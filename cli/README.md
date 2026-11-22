@@ -1,6 +1,6 @@
 # tracebase-cli
 
-Command line and **MCP server** for [Tracebase](https://demo.tracebase.duckdns.org), the self-hosted search
+Command line and **MCP server** for [Tracebase](https://github.com/anshuraj669/tracebase), the self-hosted search
 and Q&A over all your past projects and production logs.
 
 It lets you, and the AI agent you already use (Claude Code, Codex, Gemini CLI, opencode, Cursor, an Ollama model),
@@ -59,7 +59,8 @@ tracebase team add priya --repos "freelance/*"     team server admin
 
 ## Run your own server
 
-See the main project: Docker, a NAS, or one small cloud server with automatic HTTPS.
+See [the main project](https://github.com/anshuraj669/tracebase): Docker, a NAS, or one small cloud server with
+automatic HTTPS.
 
 ## License
 
