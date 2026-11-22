@@ -1,5 +1,7 @@
 # tracebase-cli
 
+<!-- mcp-name: io.github.anshuraj669/tracebase -->
+
 Command line and **MCP server** for [Tracebase](https://github.com/anshuraj669/tracebase), the self-hosted search
 and Q&A over all your past projects and production logs.
 

@@ -25,3 +25,6 @@ deploy/.env
 
 # local docs, screenshots and demo media
 docs/
+
+# Python package builds
+cli/dist/
