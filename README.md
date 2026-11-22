@@ -14,6 +14,10 @@ Self-hosted. Runs on a NAS, a home server or any machine with Docker. Built in p
 | 5 | The agent: one chat box across code, logs and backups | planned |
 | 6 | Packaging for the NAS | planned |
 
+**Your data:** personal data and secrets in logs (emails, IPs, card numbers, tokens, passwords) are redacted
+before anything is stored; old records are deleted after a retention period; the database can be encrypted at
+rest (`TRACEBASE_DB_KEY`); and `tracebase data` shows, exports and erases what is stored. See [PRIVACY.md](PRIVACY.md).
+
 ---
 
 ## Phase 3: Log Detective
@@ -305,7 +309,7 @@ REPOS_DIR=~/code docker compose up --build   # index your own code (mounted read
 **Locally:**
 
 ```bash
-make setup        # backend venv (uv) + npm install
+make setup        # backend venv (uv) + npm install (+ SQLCipher where a wheel exists)
 make demo         # generate demo repos
 make dev          # build UI, run on http://localhost:8080
 make test         # pytest
@@ -330,7 +334,14 @@ For written answers, run `ollama pull llama3.1` (or any model).
 | `TRACEBASE_ADMIN_TOKEN` | *(empty)* | set it to turn on team mode (tokens, per-member repos, audit log) |
 | `TRACEBASE_LOGS_DIR` | `/volume1/logs` | log files to watch (Log Detective) |
 | `TRACEBASE_LOG_INTERVAL` | `15` | seconds between log collection runs |
-| `TRACEBASE_LOG_RETENTION_DAYS` | `30` | log lines older than this are pruned (error groups are kept) |
+| `TRACEBASE_LOG_RETENTION_DAYS` | `30` | days to keep log lines (`0` = forever) |
+| `TRACEBASE_ERROR_RETENTION_DAYS` | `90` | days to keep an error group after it was last seen |
+| `TRACEBASE_ALERT_RETENTION_DAYS` · `TRACEBASE_AUDIT_RETENTION_DAYS` | `90` · `365` | days to keep alerts · audit entries |
+| `TRACEBASE_REDACT` · `TRACEBASE_REDACT_IPS` | `1` · `1` | redact personal data and secrets in logs before storing · IPs too |
+| `TRACEBASE_REDACT_EXTRA` | *(empty)* | your own patterns, a JSON list of regexes: `["CUST-\\d{6}"]` |
+| `TRACEBASE_DB_KEY` · `TRACEBASE_DB_KEY_FILE` | *(empty)* | encrypt the database (SQLCipher); keep the key safe |
+| `TRACEBASE_MAX_INGEST_MB` | `20` | largest log upload |
+| `TRACEBASE_CORS_ORIGINS` | *(empty)* | other sites allowed to call the API (comma-separated) |
 | `TRACEBASE_DOCKER_LOGS` | `0` | `1`: also read `docker logs` of running containers |
 | `TRACEBASE_ALERT_WEBHOOK` | *(empty)* | optional: push alerts to your own ntfy / Slack webhook |
 
@@ -355,6 +366,8 @@ For written answers, run `ollama pull llama3.1` (or any model).
 | `GET /api/team/me` | who you are and which repos you see |
 | `GET/POST /api/team/users`, `PUT …/{name}/repos`, `POST …/{name}/rotate`, `DELETE …/{name}` | members (admin) |
 | `GET /api/team/audit?user=&action=` · `POST /api/team/events` | audit log (admin) · report a copy |
+| `GET /api/data/summary` · `GET /api/data/export?service=&match=` | what is stored · export as NDJSON (admin) |
+| `POST /api/data/purge` · `DELETE /api/data/services/{s}` · `DELETE /api/data/repos/{r}` · `POST /api/data/prune` · `POST /api/data/wipe` | erase data (admin, see [PRIVACY.md](PRIVACY.md)) |
 
 ```
 GET /api/code/search?q=send+password+reset+email&limit=2
@@ -372,7 +385,9 @@ backend/tracebase/
   config.py db.py    settings, SQLite schema (FTS5)
   llm.py             LLM adapter (Ollama / OpenAI-compatible)
   embeddings.py      embedder + in-memory vector index
-  scheduler.py       re-index, log collection, log pruning
+  scheduler.py       re-index, log collection, retention
+  redact.py          personal data + secrets removed from logs before storage
+  privacy.py         retention, forget / purge / export / wipe, redaction of older data
   team.py            team mode: tokens, per-member repo + log-service access, audit log
   logs/              parser (many formats + stack traces), grouper (fingerprints, spikes), collector
                      (files, Docker, HTTP), explain.py (rules + code + git blame + other services + local LLM)

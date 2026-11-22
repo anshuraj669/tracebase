@@ -44,4 +44,22 @@ export const api = {
   alerts: (unread) => req('GET', `/api/alerts${unread ? '?unread=true' : ''}`),
   readAlerts: () => req('POST', '/api/alerts/read', {}),
   ingest: (text, service) => req('POST', `/api/logs/ingest?${qs({ service })}`, text, auth.get(), true),
+  // Data & privacy (admin)
+  dataSummary: () => req('GET', '/api/data/summary'),
+  dataPrune: () => req('POST', '/api/data/prune'),
+  forgetRepo: (name) => req('DELETE', `/api/data/repos/${name.split('/').map(encodeURIComponent).join('/')}`),
+  restoreRepo: (name) => req('POST', `/api/data/repos/${name.split('/').map(encodeURIComponent).join('/')}/restore`),
+  forgetService: (name, exclude) => req('DELETE', `/api/data/services/${encodeURIComponent(name)}?${qs({ exclude: exclude || undefined })}`),
+  restoreService: (name) => req('POST', `/api/data/services/${encodeURIComponent(name)}/restore`),
+  purge: (match, dryRun) => req('POST', '/api/data/purge', { match, dry_run: !!dryRun }),
+  // NDJSON download (with the token in a header, so not a plain link)
+  exportData: async (service, match) => {
+    const token = auth.get()
+    const res = await fetch(`/api/data/export?${qs({ service, match })}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText)
+    const url = URL.createObjectURL(await res.blob())
+    const a = Object.assign(document.createElement('a'), { href: url, download: `tracebase-export-${service || 'all'}.ndjson` })
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  },
 }

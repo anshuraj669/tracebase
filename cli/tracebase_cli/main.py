@@ -12,6 +12,7 @@
   tracebase errors --since "last night"          production errors, grouped (Log Detective)
   tracebase why E-5                              why it happened: cause, the failing code, the commit, the fix
   docker logs app 2>&1 | tracebase ingest - --service app      send logs from anywhere
+  tracebase data                                 what is stored; export / purge / forget (admin)
 
 Everything stays on your machine: no AI writes the code and nothing is sent to the internet. Tracebase finds
 your code, copies it, and merges it into existing files (missing methods, imports, wiring lines). It never
@@ -454,6 +455,109 @@ def cmd_team(args: argparse.Namespace, api: Client) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- data & privacy (admin)
+def _size(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.0f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"
+
+
+def _confirm(question: str, yes: bool) -> bool:
+    if yes:
+        return True
+    if not sys.stdin.isatty():
+        ui.error("refusing to delete without confirmation: pass --yes")
+        return False
+    return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
+
+
+def _deleted(res: dict) -> str:
+    d = res.get("deleted") or res.get("would_delete") or {}
+    return ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in d.items() if v) or "nothing"
+
+
+def cmd_data(args: argparse.Namespace, api: Client) -> int:
+    a = args.action
+    if a == "summary":
+        s = api.data_summary()
+        db, c = s["database"], s["counts"]
+        print(f"{ui.bold('Database')}  {db['path']}  {_size(db['size_bytes'])}  "
+              + (ui.green("encrypted") if db["encrypted"] else ui.yellow("not encrypted (set TRACEBASE_DB_KEY)")))
+        print(f"{ui.bold('Code')}      {c['repos']} repos, {c['files']} files, {c['chunks']} code chunks, "
+              f"{c['secrets']} secrets findings")
+        span = f" ({s['logs']['oldest'] or '-'} → {s['logs']['newest'] or '-'})" if c["log_events"] else ""
+        print(f"{ui.bold('Logs')}      {c['log_events']} log lines{span}, {c['error_groups']} error groups, "
+              f"{c['alerts']} alerts")
+        print(f"{ui.bold('Team')}      {c['users']} members, {c['audit']} audit entries")
+        r = s["redaction"]
+        print(f"{ui.bold('Redaction')} " + (ui.green("on") + (", IPs too" if r["ips"] else ", IPs kept")
+                                            + (", custom patterns" if r["custom_patterns"] else "")
+                                            if r["enabled"] else ui.yellow("off: personal data in logs is stored")))
+        print(f"{ui.bold('Retention')} " + ", ".join(f"{k.replace('_', ' ')} {v}d" if v else f"{k.replace('_', ' ')} forever"
+                                                     for k, v in s["retention_days"].items()))
+        ex = s["excluded"]
+        if ex["repos"] or ex["services"]:
+            print(f"{ui.bold('Forgotten')} repos: {', '.join(ex['repos']) or '-'} · services: {', '.join(ex['services']) or '-'}")
+        o = s["outbound"]
+        print(f"{ui.bold('Outbound')}  alert webhook: {'on' if o['alert_webhook'] else 'off'} · "
+              f"LLM: {o['llm']['provider']} at {o['llm']['base_url']}")
+        return 0
+    if a == "prune":
+        print(f"{ui.green('✓')} Retention applied: deleted {_deleted(api.data_prune())}")
+        return 0
+    if a == "export":
+        out_path = args.output or f"tracebase-export-{args.service or 'all'}.ndjson"
+        if out_path == "-":
+            n = api.export(sys.stdout, service=args.service, match=args.match)
+        else:
+            fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # personal data: owner-only
+            with os.fdopen(fd, "w", encoding="utf-8") as out:
+                n = api.export(out, service=args.service, match=args.match)
+        if out_path != "-":
+            ui.info(f"{ui.green('✓')} {n} records written to {out_path} (only you can read it)")
+        return 0
+    if a == "wipe":
+        if not _confirm("Delete EVERYTHING Tracebase stored (code index, logs, errors, alerts"
+                        + ("" if args.keep_team else ", members, audit log") + ")?", args.yes):
+            return 1
+        api.wipe(keep_team=args.keep_team)
+        ui.info(f"{ui.green('✓')} All stored data deleted. The code index is rebuilt from the repos folder on the next run.")
+        return 0
+    if not args.name:
+        ui.error(f"tracebase data {a} needs a name (or text to match)")
+        return 2
+    if a == "forget-repo":
+        if not _confirm(f"Delete the index of {args.name} and stop indexing it?", args.yes):
+            return 1
+        res = api.forget_repo(args.name)
+        ui.info(f"{ui.green('✓')} Forgot {args.name}: deleted {_deleted(res)}. It won't be indexed again "
+                f"(`tracebase data restore-repo {args.name}` to undo). The folder on disk is untouched.")
+    elif a == "restore-repo":
+        api.restore_repo(args.name)
+        ui.info(f"{ui.green('✓')} {args.name} will be indexed again on the next run.")
+    elif a == "forget-service":
+        if not _confirm(f"Delete all logs, errors and alerts of {args.name}?", args.yes):
+            return 1
+        res = api.forget_service(args.name, exclude=args.stop)
+        ui.info(f"{ui.green('✓')} Deleted {_deleted(res)} of {args.name}."
+                + (" New logs for it are dropped." if args.stop else ""))
+    elif a == "restore-service":
+        api.restore_service(args.name)
+        ui.info(f"{ui.green('✓')} Logs for {args.name} are accepted again.")
+    elif a == "purge":
+        preview = api.purge(args.name, service=args.service, dry_run=True)
+        if not any((preview.get("would_delete") or {}).values()):
+            ui.info("Nothing stored contains that text.")
+            return 0
+        if args.dry_run or not _confirm(f"Delete {_deleted(preview)} containing that text?", args.yes):
+            ui.info(f"Would delete: {_deleted(preview)}")
+            return 0
+        ui.info(f"{ui.green('✓')} Deleted {_deleted(api.purge(args.name, service=args.service))}")
+    return 0
+
+
 def cmd_mcp(args: argparse.Namespace, api: Client) -> int:
     from .mcp_server import run
     run(api)
@@ -560,6 +664,30 @@ def main(argv: list[str] | None = None) -> int:
     al.add_argument("--all", action="store_true", help="include read alerts")
     al.add_argument("--read", action="store_true", help="mark them as read")
     al.set_defaults(fn=cmd_alerts)
+
+    da = sub.add_parser("data", help="what is stored, export it, delete it (admin)",
+                        description="Data & privacy: see what Tracebase stores, export it, and delete it.",
+                        epilog="""examples:
+  tracebase data                                   what is stored, encryption, redaction, retention
+  tracebase data export --service shop-api         everything stored about a service (NDJSON)
+  tracebase data purge "CUST-10442"                erase every log line / error / alert containing it
+  tracebase data forget-repo client-a/old-site     delete a repo's index and stop indexing it
+  tracebase data forget-service payments --stop    delete a service's logs and drop new ones
+  tracebase data prune                             apply the retention periods now""",
+                        formatter_class=argparse.RawDescriptionHelpFormatter)
+    da.add_argument("action", nargs="?", default="summary",
+                    choices=["summary", "export", "purge", "forget-repo", "restore-repo", "forget-service",
+                             "restore-service", "prune", "wipe"])
+    da.add_argument("name", nargs="?", help="repo, service, or the text to purge")
+    da.add_argument("--service", help="export / purge: only this service")
+    da.add_argument("--match", help="export: only records containing this text")
+    da.add_argument("-o", "--output", help="export: file to write (- for stdout)")
+    da.add_argument("--stop", action="store_true", help="forget-service: also drop new logs for it")
+    da.add_argument("--dry-run", action="store_true", help="purge: only count what would be deleted")
+    da.add_argument("--keep-team", action=argparse.BooleanOptionalAction, default=True,
+                    help="wipe: keep members and the audit log (default)")
+    da.add_argument("-y", "--yes", action="store_true", help="delete without asking")
+    da.set_defaults(fn=cmd_data)
 
     sub.add_parser("status", help="check the connection to the Tracebase server").set_defaults(fn=cmd_status)
     sub.add_parser("mcp", help="MCP server (stdio) for your AI assistant").set_defaults(fn=cmd_mcp)

@@ -5,6 +5,7 @@ import SearchPage from './pages/SearchPage'
 import ReposPage from './pages/ReposPage'
 import SecretsPage from './pages/SecretsPage'
 import LogsPage from './pages/LogsPage'
+import DataPage from './pages/DataPage'
 import CodeViewer from './components/CodeViewer'
 import Icon, { Logo } from './components/Icon'
 
@@ -14,6 +15,7 @@ const NAV = [
   { id: 'repos', label: 'Repositories', icon: 'repo', title: 'Repositories' },
   { id: 'logs', label: 'Log Detective', icon: 'logs', title: 'Log Detective' },
   { id: 'secrets', label: 'Secrets scan', icon: 'shield', title: 'Secrets scan' },
+  { id: 'data', label: 'Data & privacy', icon: 'backup', title: 'Data & privacy', admin: true },
 ]
 const SOON = [
   { label: 'Backups', icon: 'backup' },
@@ -70,7 +72,7 @@ export default function App() {
       <aside className="side">
         <div className="side-brand"><Logo /> <span>Tracebase</span></div>
         <nav className="side-nav">
-          {NAV.map((n) => (
+          {NAV.filter((n) => !n.admin || !me || me.role === 'admin').map((n) => (
             <a key={n.id} href={`#${n.id}`} className={page.id === n.id ? 'active' : ''}>
               <Icon name={n.icon} /> <span>{n.label}</span>
               {n.id === 'logs' && stats?.open_errors > 0 && <span className="nav-count">{stats.open_errors}</span>}
@@ -93,7 +95,7 @@ export default function App() {
           ) : (
             <>
               <b>Private by design</b>
-              <span>Your code and logs are indexed and explained on this machine. Nothing leaves your network.</span>
+              <span>Your code and logs are indexed and explained on this machine. Personal data in logs is redacted before it is stored.</span>
             </>
           )}
         </div>
@@ -117,6 +119,7 @@ export default function App() {
             {page.id === 'repos' && <ReposPage onOpen={setOpen} stats={stats} onReindex={refresh} />}
             {page.id === 'logs' && <LogsPage onOpen={setOpen} stats={stats} selected={sub} />}
             {page.id === 'secrets' && <SecretsPage onOpen={setOpen} />}
+            {page.id === 'data' && <DataPage />}
           </section>
         </div>
         {open && <CodeViewer key={`${open.repo}/${open.path}`} loc={open} onClose={() => setOpen(null)} llm={llmOk} />}

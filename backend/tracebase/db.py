@@ -1,6 +1,15 @@
-"""SQLite storage (metadata + FTS5 full-text search + embedding blobs)."""
+"""SQLite storage (metadata + FTS5 full-text search + embedding blobs).
+
+Encryption at rest: set TRACEBASE_DB_KEY (or TRACEBASE_DB_KEY_FILE) and the database is opened with SQLCipher
+(AES-256), so a copied disk, volume or backup is unreadable without the key. An existing plain database is
+encrypted in place on first start with a key. Without a key, plain SQLite is used: protect the disk instead
+(LUKS, an encrypted EBS volume). Deleted rows are overwritten (secure_delete), so purged data does not linger
+in free pages.
+"""
 from __future__ import annotations
 
+import logging
+import os
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -73,6 +82,7 @@ CREATE TABLE IF NOT EXISTS audit (
     at TEXT DEFAULT CURRENT_TIMESTAMP,
     user TEXT, action TEXT, repo TEXT, detail TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_audit_at ON audit(at);
 
 -- ---------- Log Detective ----------
 CREATE TABLE IF NOT EXISTS error_groups (
@@ -103,6 +113,7 @@ CREATE TABLE IF NOT EXISTS log_events (
 CREATE INDEX IF NOT EXISTS idx_log_ts ON log_events(ts);
 CREATE INDEX IF NOT EXISTS idx_log_service ON log_events(service, ts);
 CREATE INDEX IF NOT EXISTS idx_log_group ON log_events(group_id, ts);
+CREATE INDEX IF NOT EXISTS idx_groups_last_seen ON error_groups(last_seen);
 CREATE TABLE IF NOT EXISTS log_offsets (
     path TEXT PRIMARY KEY,
     inode INTEGER,
@@ -120,6 +131,7 @@ CREATE TABLE IF NOT EXISTS alerts (
     read INTEGER DEFAULT 0,
     dedupe_key TEXT UNIQUE
 );
+CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at);
 
 -- ---------- Shared ----------
 CREATE TABLE IF NOT EXISTS kv (
@@ -128,9 +140,92 @@ CREATE TABLE IF NOT EXISTS kv (
 );
 """
 
+log = logging.getLogger(__name__)
 _local = threading.local()
 _init_lock = threading.Lock()
 _initialized: set[str] = set()
+PLAIN_HEADER = b"SQLite format 3\x00"
+
+
+class DatabaseKeyError(RuntimeError):
+    pass
+
+
+def _driver():
+    if not settings.db_key:
+        return sqlite3
+    try:
+        from sqlcipher3 import dbapi2  # pip install sqlcipher3-binary (Linux x86-64) or sqlcipher3 (+ libsqlcipher)
+    except ImportError as e:
+        raise DatabaseKeyError(
+            "TRACEBASE_DB_KEY is set but SQLCipher is not installed. Install `sqlcipher3-binary` (Linux x86-64) "
+            "or `sqlcipher3` with libsqlcipher, or use the Docker image, which includes it.") from e
+    return dbapi2
+
+
+def _quote(key: str) -> str:
+    return "'" + key.replace("'", "''") + "'"
+
+
+def _is_plain(path: str) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return f.read(16) == PLAIN_HEADER
+    except OSError:
+        return False
+
+
+def _encrypt_existing(path: str) -> None:
+    """A plain database + a key: copy it into an encrypted database, then swap the files (once)."""
+    drv = _driver()
+    tmp = path + ".encrypting"
+    for f in (tmp, tmp + "-wal", tmp + "-shm"):
+        if os.path.exists(f):
+            os.remove(f)
+    src = sqlite3.connect(path)
+    src.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    src.close()
+    conn = drv.connect(path)
+    conn.execute(f"ATTACH DATABASE {_quote(tmp)} AS enc KEY {_quote(settings.db_key)}")
+    conn.execute("SELECT sqlcipher_export('enc')")
+    conn.execute("DETACH DATABASE enc")
+    conn.close()
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    for f in (path + "-wal", path + "-shm"):
+        if os.path.exists(f):
+            os.remove(f)  # held the old plain pages
+    log.warning("database encrypted with TRACEBASE_DB_KEY: %s (old plain copies in backups are still readable)", path)
+
+
+def _open(path: str):
+    drv = _driver()
+    if settings.db_key and _is_plain(path):
+        _encrypt_existing(path)
+    conn = drv.connect(path, timeout=30, check_same_thread=False)
+    if settings.db_key:
+        conn.execute(f"PRAGMA key = {_quote(settings.db_key)}")
+    try:
+        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+    except drv.DatabaseError as e:
+        conn.close()
+        if settings.db_key:
+            raise DatabaseKeyError(f"cannot open {path}: wrong TRACEBASE_DB_KEY (or the file is damaged)") from e
+        raise DatabaseKeyError(f"cannot open {path}: it is encrypted, set TRACEBASE_DB_KEY") from e
+    conn.row_factory = drv.Row
+    conn.execute("PRAGMA secure_delete=ON")  # deleted rows are zeroed, not left in free pages
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+def open_private():
+    """A separate connection (same key and settings), for long reads that must not share the thread's connection."""
+    connect()  # schema + one-time encryption first
+    return _open(str(settings.db_path))
+
+
+def encrypted() -> bool:
+    return bool(settings.db_key)
 
 
 def connect() -> sqlite3.Connection:
@@ -140,15 +235,31 @@ def connect() -> sqlite3.Connection:
     if conn is not None and getattr(_local, "path", None) == path:
         return conn
     settings.data_dir.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
     with _init_lock:
+        conn = _open(path)
         if path not in _initialized:
             conn.executescript(SCHEMA)
             _initialized.add(path)
-    conn.execute("PRAGMA foreign_keys=ON")
+            for f in (path, path + "-wal", path + "-shm"):
+                try:
+                    os.chmod(f, 0o600)
+                except OSError:
+                    pass
     _local.conn, _local.path = conn, path
     return conn
+
+
+def checkpoint() -> None:
+    """Fold the write-ahead log into the database and truncate it (after a purge: no old pages left in the WAL)."""
+    try:
+        connect().execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except Exception as e:  # pragma: no cover (busy readers: retried on the next purge)
+        log.warning("wal checkpoint failed: %s", e)
+
+
+def size_bytes() -> int:
+    p = str(settings.db_path)
+    return sum(os.path.getsize(f) for f in (p, p + "-wal") if os.path.exists(f))
 
 
 def reset_for_tests() -> None:

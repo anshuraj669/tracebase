@@ -16,6 +16,9 @@ def _run(args: list[str], cwd: Path, timeout: int = 30) -> str:
 
 def find_git_dir(repo: str) -> Path | None:
     """Working clone in the repos dir (Phase 3 adds Backup Guardian's bare mirrors)."""
+    from ..privacy import is_excluded_repo
+    if is_excluded_repo(repo):
+        return None
     p = settings.repos_dir / repo
     if (p / ".git").exists():
         return p

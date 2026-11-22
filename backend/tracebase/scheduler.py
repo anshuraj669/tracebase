@@ -1,4 +1,5 @@
-"""Scheduler: re-indexes the repos folder (incremental), tails log files (and Docker logs if enabled), prunes old logs."""
+"""Scheduler: re-indexes the repos folder (incremental), tails log files (and Docker logs if enabled), and deletes
+records older than their retention period (at startup and nightly)."""
 from __future__ import annotations
 
 import logging
@@ -9,7 +10,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from .code.indexer import index_all
 from .config import settings
 from .logs.collector import collect_docker, collect_files, docker_available
-from .logs.grouper import prune
+from . import privacy
 
 log = logging.getLogger(__name__)
 scheduler: BackgroundScheduler | None = None
@@ -42,7 +43,8 @@ def start() -> None:
                       next_run_time=datetime.now() + timedelta(seconds=4))
     if docker_available():
         scheduler.add_job(_safe(collect_docker), "interval", seconds=max(settings.log_interval * 2, 15), id="logs:docker")
-    scheduler.add_job(_safe(prune, settings.log_retention_days), "cron", hour=4, minute=30, id="logs:prune")
+    scheduler.add_job(_safe(privacy.prune), "cron", hour=4, minute=30, id="privacy:retention",
+                      next_run_time=datetime.now() + timedelta(seconds=30))
     scheduler.start()
 
 

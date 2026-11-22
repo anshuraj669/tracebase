@@ -2,6 +2,7 @@
 (Phases 1-3: Code Search & Q&A, copy code across projects, team mode, Log Detective)"""
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from contextlib import asynccontextmanager
@@ -9,19 +10,20 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import __version__, alerts, scheduler, team
+from . import __version__, alerts, privacy, scheduler, team
 from .reuse.bundle import bundle as make_bundle
 from .reuse.retrieve import find_examples
 from .reuse.stack import PRIMARY, detect as detect_stack
 from .code import git, indexer, qa, search
 from .code.secrets import suggestion
 from .config import settings
-from .db import row, rows
+from .db import encrypted, row, rows
 from .embeddings import embedder
 from .llm import LLMUnavailable, llm
 from .logs import collector, grouper
@@ -33,27 +35,51 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings.ensure_dirs()
+    # Privacy upgrade: data stored before redaction existed (or under older rules) is redacted before serving.
+    privacy.redact_stored()
     scheduler.start()
     yield
     scheduler.stop()
 
 
 app = FastAPI(title="Tracebase", version=__version__, lifespan=lifespan, dependencies=[Depends(team.authenticate)])
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+if settings.cors_origins:  # the UI is served by this app (same origin): cross-site access only if you list sites
+    app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_methods=["*"],
+                       allow_headers=["Authorization", "Content-Type"])
+
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+}
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    resp = await call_next(request)
+    for k, v in SECURITY_HEADERS.items():
+        resp.headers.setdefault(k, v)
+    if request.url.path.startswith("/api/"):
+        resp.headers.setdefault("Cache-Control", "no-store")  # API answers carry code and logs: never cache them
+    return resp
 
 
 @app.get("/api/health")
 def health() -> dict:
+    basic = {"status": "ok", "version": __version__, "phase": 3, "team": team.enabled()}
+    if team.enabled() and team.current() is team.ANONYMOUS:
+        return basic  # public servers: no paths or settings for visitors without a token
     return {
-        "version": __version__,
-        "phase": 3,
+        **basic,
         "logs_dir": str(settings.logs_dir),
+        "privacy": {"redaction": settings.redact_logs, "encrypted": encrypted(),
+                    "log_retention_days": settings.log_retention_days},
         "alert_webhook": bool(settings.alert_webhook),
         "llm": {"provider": llm.provider, "model": settings.llm_model, "available": llm.available()},
         "embeddings": embedder.name,
         "repos_dir": str(settings.repos_dir),
         "scheduler": scheduler.jobs(),
-        "team": team.enabled(),
     }
 
 
@@ -245,15 +271,31 @@ def _group_or_404(gid: str) -> dict:
 
 @app.post("/api/logs/ingest")
 async def logs_ingest(request: Request, service: str | None = None) -> dict:
-    """Send log lines from anywhere: raw text, {"lines": [...]}, {"events": [...]} or a JSON list of events."""
+    """Send log lines from anywhere: raw text, {"lines": [...]}, {"events": [...]} or a JSON list of events.
+    Personal data and secrets are redacted before anything is stored."""
+    limit = settings.max_ingest_mb * 1024 * 1024
+    too_big = HTTPException(413, f"log upload larger than {settings.max_ingest_mb} MB: send it in parts")
+    if int(request.headers.get("content-length") or 0) > limit:
+        raise too_big
+    buf = bytearray()
+    async for part in request.stream():
+        buf += part
+        if len(buf) > limit:
+            raise too_big
+    body = bytes(buf)
     if "json" in request.headers.get("content-type", ""):
-        payload: Any = await request.json()
+        try:
+            payload: Any = json.loads(body or b"null")
+        except ValueError:
+            raise HTTPException(400, "invalid JSON")
         if isinstance(payload, list):
             payload = {"events": payload}
+        if not isinstance(payload, dict):
+            raise HTTPException(400, 'expected {"lines": [...]}, {"events": [...]} or a list of events')
     else:
-        payload = (await request.body()).decode("utf-8", "replace")
-    try:
-        res = collector.ingest_payload(payload, service)
+        payload = body.decode("utf-8", "replace")
+    try:  # parsing + redaction is CPU work: off the event loop (the request's user context goes with it)
+        res = await run_in_threadpool(collector.ingest_payload, payload, service)
     except PermissionError as e:
         raise HTTPException(403, str(e))
     team.log("logs_ingest", None, service=service, events=res["events"])
@@ -430,6 +472,110 @@ def team_event(body: EventReq) -> dict:
     team.require_repo(body.repo)
     team.log(body.action[:40], body.repo, **body.detail)
     return {"ok": True}
+
+
+# ---------------------------------------------------------------- data & privacy: what is stored, export, delete
+# Admin only, and every call is written to the audit log (team mode).
+class PurgeReq(BaseModel):
+    match: str
+    service: str | None = None
+    dry_run: bool = False
+
+
+class WipeReq(BaseModel):
+    confirm: str
+    keep_team: bool = True
+
+
+@app.get("/api/data/summary")
+def data_summary() -> dict:
+    team.require_admin()
+    return privacy.summary()
+
+
+@app.post("/api/data/prune")
+def data_prune() -> dict:
+    team.require_admin()
+    res = privacy.prune()
+    team.log("data_prune", None, **res)
+    return {"deleted": res}
+
+
+@app.delete("/api/data/repos/{name:path}")
+def data_forget_repo(name: str) -> dict:
+    team.require_admin()
+    try:
+        res = privacy.forget_repo(name)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    team.log("data_forget_repo", name, **res["deleted"])
+    return res
+
+
+@app.post("/api/data/repos/{name:path}/restore")
+def data_restore_repo(name: str) -> dict:
+    team.require_admin()
+    try:
+        res = privacy.restore_repo(name)
+    except KeyError:
+        raise HTTPException(404, f"{name} is not a forgotten repo")
+    team.log("data_restore_repo", name)
+    return res
+
+
+@app.delete("/api/data/services/{service}")
+def data_forget_service(service: str, exclude: bool = False) -> dict:
+    team.require_admin()
+    try:
+        res = privacy.forget_service(service, exclude=exclude)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    team.log("data_forget_service", None, service=service, excluded=exclude, **res["deleted"])
+    return res
+
+
+@app.post("/api/data/services/{service}/restore")
+def data_restore_service(service: str) -> dict:
+    team.require_admin()
+    try:
+        res = privacy.restore_service(service)
+    except KeyError:
+        raise HTTPException(404, f"{service} is not an excluded service")
+    team.log("data_restore_service", None, service=service)
+    return res
+
+
+@app.post("/api/data/purge")
+def data_purge(body: PurgeReq) -> dict:
+    team.require_admin()
+    try:
+        res = privacy.purge_matching(body.match, body.service, body.dry_run)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not body.dry_run:  # the audit entry must not keep the very value that was erased
+        team.log("data_purge", None, service=body.service, match_length=len(body.match), **res["deleted"])
+    return res
+
+
+@app.get("/api/data/export")
+def data_export(service: str | None = None, match: str | None = None) -> StreamingResponse:
+    team.require_admin()
+    if match is not None and len(match.strip()) < 4:
+        raise HTTPException(400, "give at least 4 characters to match")
+    team.log("data_export", None, service=service, match=bool(match))
+    name = f"tracebase-export-{service or 'all'}.ndjson"
+    return StreamingResponse(privacy.export(service, match), media_type="application/x-ndjson",
+                             headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@app.post("/api/data/wipe")
+def data_wipe(body: WipeReq) -> dict:
+    team.require_admin()
+    if body.confirm != "delete everything":
+        raise HTTPException(400, 'send {"confirm": "delete everything"} to wipe all stored data')
+    res = privacy.wipe(keep_team=body.keep_team)
+    team.log("data_wipe", None, keep_team=body.keep_team)
+    return res
 
 
 dist = settings.frontend_dist.resolve()

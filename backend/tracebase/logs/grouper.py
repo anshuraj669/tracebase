@@ -8,7 +8,7 @@ import re
 from collections import defaultdict
 from datetime import datetime, timedelta
 
-from .. import team
+from .. import redact, team
 from ..alerts import raise_alert
 from ..db import connect, row, rows, tx
 from ..timeutil import iso, now, parse_since, parse_ts
@@ -38,16 +38,37 @@ def normalise(message: str) -> str:
     return m[:300]
 
 
-def fingerprint(ev: Event) -> tuple[str, str, list[dict]]:
-    frames = extract_frames(ev.text)
-    norm = normalise(ev.message)
+def group_key(service: str, message: str, frames: list[dict]) -> tuple[str, str]:
+    """(fingerprint, normalised message): same service + same message shape + same top frame = same group."""
+    norm = normalise(message)
     top = frames[0] if frames else None
-    key = f"{ev.service}|{norm}|{top.path.rsplit('/', 1)[-1] + ':' + (top.func or '') if top else ''}"
-    return hashlib.sha1(key.encode()).hexdigest()[:16], norm, [f.as_dict() for f in frames]
+    key = f"{service}|{norm}|{top['path'].rsplit('/', 1)[-1] + ':' + (top.get('func') or '') if top else ''}"
+    return hashlib.sha1(key.encode()).hexdigest()[:16], norm
+
+
+def fingerprint(ev: Event) -> tuple[str, str, list[dict]]:
+    frames = [f.as_dict() for f in extract_frames(ev.text)]
+    fp, norm = group_key(ev.service, ev.message, frames)
+    return fp, norm, frames
+
+
+def scrub(events: list[Event]) -> list[Event]:
+    """Privacy, before anything is stored: drop events of forgotten services, redact personal data and secrets."""
+    from ..privacy import excluded_services
+
+    ex = set(excluded_services())
+    if ex:
+        events = [e for e in events if e.service not in ex]
+    if redact.enabled():
+        for e in events:
+            e.message = redact.redact(e.message)
+            e.stack = redact.redact_lines(e.stack)
+    return events
 
 
 def ingest_events(events: list[Event], source: str = "") -> dict:
     """Store events, update groups. Returns stats and newly created group ids."""
+    events = scrub(events)
     if not events:
         return {"events": 0, "errors": 0, "new_groups": []}
     new_groups: list[int] = []
@@ -252,9 +273,3 @@ def timeline(service: str | None = None, hours: int = 48) -> list[dict]:
         p.append(service)
     return rows(q + " GROUP BY bucket ORDER BY bucket", tuple(p))
 
-
-def prune(days: int) -> int:
-    cutoff = iso(now() - timedelta(days=days))
-    with tx() as c:
-        n = c.execute("DELETE FROM log_events WHERE ts < ?", (cutoff,)).rowcount
-    return n

@@ -9,7 +9,7 @@ import threading
 
 import httpx
 
-from . import team
+from . import redact, team
 from .config import settings
 from .db import rows, tx
 
@@ -18,6 +18,7 @@ log = logging.getLogger(__name__)
 
 def raise_alert(kind: str, severity: str, title: str, body: str = "", link: str = "", dedupe_key: str | None = None,
                 service: str | None = None) -> bool:
+    title, body = redact.redact(title), redact.redact(body)  # alerts also go to the webhook: never raw data
     with tx() as c:
         cur = c.execute(
             "INSERT OR IGNORE INTO alerts(kind,severity,service,title,body,link,dedupe_key) VALUES(?,?,?,?,?,?,?)",

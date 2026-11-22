@@ -60,11 +60,19 @@ if [[ ! -f "$ENV" ]]; then
   [[ -n "$DOMAIN" ]] || { echo "first run needs --domain <name> (or --domain auto)" >&2; exit 1; }
   cp "$HERE/.env.example" "$ENV"
   sed -i "s|^DOMAIN=.*|DOMAIN=$DOMAIN|; s|^ADMIN_TOKEN=.*|ADMIN_TOKEN=$(openssl rand -hex 32)|" "$ENV"
-  chmod 600 "$ENV"
-  echo "created, with a new admin token"
+  sed -i "s|^DB_KEY=.*|DB_KEY=$(openssl rand -hex 32)|" "$ENV"
+  echo "created, with a new admin token and database encryption key"
 elif [[ -n "$DOMAIN" ]]; then
   sed -i "s|^DOMAIN=.*|DOMAIN=$DOMAIN|" "$ENV"
 fi
+# Upgrades from versions without encryption: add a key (the existing database is encrypted on the next start)
+if ! grep -q '^DB_KEY=.' "$ENV"; then
+  sed -i '/^DB_KEY=/d' "$ENV"
+  printf '\n# Encryption at rest (added by setup.sh). Back it up: without it the database cannot be opened.\nDB_KEY=%s\n' \
+    "$(openssl rand -hex 32)" >> "$ENV"
+  echo "added a database encryption key: the existing database will be encrypted on start"
+fi
+chmod 600 "$ENV"
 
 if [[ $DEMO -eq 1 ]]; then
   say "Demo data (repos + logs)"
@@ -95,6 +103,7 @@ $(printf '\033[1;32m')Tracebase is starting at https://$DOMAIN$(printf '\033[0m'
   (the HTTPS certificate is fetched on the first visit; DNS must already point at this server)
 
 Admin token (keep it secret):   sudo grep ADMIN_TOKEN $ENV
+Database key (back it up now: without it the database cannot be opened):   sudo grep DB_KEY $ENV
 Add a person (from your laptop, with the tracebase CLI):
   TRACEBASE_URL=https://$DOMAIN TRACEBASE_TOKEN=<admin token> tracebase team add priya --repos "client-a/*"
   (or with curl from anywhere: see deploy/README.md)

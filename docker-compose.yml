@@ -12,6 +12,7 @@ services:
       TRACEBASE_LLM_MODEL: ${LLM_MODEL:-llama3.1}
       TRACEBASE_ADMIN_TOKEN: ${ADMIN_TOKEN:-}                    # set to turn on team mode
       TRACEBASE_ALERT_WEBHOOK: ${ALERT_WEBHOOK:-}                # optional: your own ntfy/Slack webhook
+      TRACEBASE_DB_KEY: ${DB_KEY:-}                              # optional: encrypt the database (keep the key safe)
     extra_hosts: ["host.docker.internal:host-gateway"]
     restart: unless-stopped
 
