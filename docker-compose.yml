@@ -1,0 +1,19 @@
+services:
+  tracebase:
+    build: .
+    ports: ["8080:8080"]
+    volumes:
+      - ${REPOS_DIR:-./demo/volume1/repos}:/volume1/repos:ro   # your code, read-only
+      - ${LOGS_DIR:-./demo/volume1/logs}:/volume1/logs:ro        # log files to watch (Log Detective), read-only
+      - tracebase-data:/data                                     # index database
+    environment:
+      TRACEBASE_LLM_PROVIDER: ${LLM_PROVIDER:-ollama}           # ollama | openai | none
+      TRACEBASE_LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:11434}
+      TRACEBASE_LLM_MODEL: ${LLM_MODEL:-llama3.1}
+      TRACEBASE_ADMIN_TOKEN: ${ADMIN_TOKEN:-}                    # set to turn on team mode
+      TRACEBASE_ALERT_WEBHOOK: ${ALERT_WEBHOOK:-}                # optional: your own ntfy/Slack webhook
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    restart: unless-stopped
+
+volumes:
+  tracebase-data:

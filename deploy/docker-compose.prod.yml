@@ -1,0 +1,53 @@
+# Tracebase on a single cloud server (AWS Lightsail / EC2, or any VPS): Tracebase + Caddy for automatic HTTPS.
+#   cd deploy && cp .env.example .env   (or run setup.sh, which writes it)
+#   docker compose -f docker-compose.prod.yml up -d --build
+# Only Caddy is reachable from the internet (ports 80/443). Tracebase itself listens on the internal network only.
+name: tracebase
+
+services:
+  tracebase:
+    build: ..
+    restart: unless-stopped
+    expose: ["8080"]
+    volumes:
+      - ${REPOS_DIR:-/srv/tracebase/repos}:/volume1/repos:ro   # the code to index, read-only
+      - ${LOGS_DIR:-/srv/tracebase/logs}:/volume1/logs:ro      # log files to watch, read-only
+      - tracebase-data:/data                                   # index + logs database (SQLite)
+    environment:
+      TRACEBASE_ADMIN_TOKEN: "${ADMIN_TOKEN:?set ADMIN_TOKEN in deploy/.env (a public server must run in team mode)}"
+      TRACEBASE_LLM_PROVIDER: ${LLM_PROVIDER:-none}             # none | ollama | openai (see README)
+      TRACEBASE_LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434}
+      TRACEBASE_LLM_MODEL: ${LLM_MODEL:-llama3.1}
+      TRACEBASE_ALERT_WEBHOOK: ${ALERT_WEBHOOK:-}
+      TRACEBASE_WATCH_INTERVAL: ${WATCH_INTERVAL:-300}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  caddy:
+    image: caddy:2.8
+    restart: unless-stopped
+    depends_on: [tracebase]
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    environment:
+      DOMAIN: "${DOMAIN:?set DOMAIN in deploy/.env, e.g. tracebase-demo.duckdns.org}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data        # HTTPS certificates: keep this volume
+      - caddy-config:/config
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  tracebase-data:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,9 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+httpx>=0.27
+numpy>=1.26
+pathspec>=0.12
+apscheduler>=3.10,<4
+tree-sitter>=0.23
+tree-sitter-language-pack>=0.7
+pyyaml>=6

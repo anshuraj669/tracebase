@@ -1,0 +1,20 @@
+# Caddy gets and renews a free Let's Encrypt certificate for $DOMAIN automatically,
+# redirects http -> https, and forwards everything to Tracebase on the internal network.
+{$DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	# log uploads can be large; anything bigger should be sent in parts
+	request_body {
+		max_size 20MB
+	}
+
+	reverse_proxy tracebase:8080
+}
