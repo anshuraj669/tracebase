@@ -14,8 +14,8 @@ Log Detective.
 
 **Run it yourself:** `git clone` this repo, then `python3 demo/seed.py && docker compose up --build` and open http://localhost:8080 (see [Run it](#run-it)).
 
-**From your AI agent:** `pip install tracebase-cli`, then `tracebase connect claude` (or codex, gemini,
-opencode, cursor). See [MCP](#use-it-from-your-ai-agent-in-the-terminal-mcp).
+**From your AI agent:** `pipx install tracebase-cli`, then `tracebase connect claude` (or codex, gemini,
+opencode, cursor, ollama). See [MCP](#use-it-from-your-ai-agent-in-the-terminal-mcp).
 
 Self-hosted. Runs on a NAS, a home server or any machine with Docker. Built in public, in phases:
 
@@ -23,14 +23,15 @@ Self-hosted. Runs on a NAS, a home server or any machine with Docker. Built in p
 |---|---|---|
 | 1 | Core + Code Search & Q&A + copy code from your old projects | ✅ done |
 | 2 | Copy upgrades: adapt copied code to the new project, Go / Java / Ruby, team mode | ✅ done |
-| **3** | **Log Detective: group errors, explain them, link them to the failing code and the commit** | ✅ this release |
+| **3** | **Log Detective: group errors, explain them, link them to the failing code and the commit. Privacy: redaction, retention, encryption at rest, export / erase** | ✅ this release |
 | 4 | Backup Guardian: git mirrors, DB dumps, verified one-click restore | next |
 | 5 | The agent: one chat box across code, logs and backups | planned |
 | 6 | Packaging for the NAS | planned |
 
 **Your data:** personal data and secrets in logs (emails, IPs, card numbers, tokens, passwords) are redacted
 before anything is stored; old records are deleted after a retention period; the database can be encrypted at
-rest (`TRACEBASE_DB_KEY`); and `tracebase data` shows, exports and erases what is stored. See [PRIVACY.md](PRIVACY.md).
+rest (`TRACEBASE_DB_KEY`); and the **Data & privacy** page (admins) or `tracebase data` shows, exports and erases
+what is stored. The container runs as a non-root user and keeps `/data` private to it. See [PRIVACY.md](PRIVACY.md).
 
 ---
 
@@ -269,15 +270,16 @@ How the approval works:
 
 MCP tools:
 
-- `find_code`
-- `preview_copy`
-- `apply_copy`
-- `get_code_bundle`
-- `search_code`
-- `read_code`
-- `list_repos`
+| Tool | |
+|---|---|
+| `find_code` | your past implementations of a task (repo, path, symbol) |
+| `preview_copy` | the copy plan as a diff; nothing is written |
+| `apply_copy` | writes an approved plan (the only tool that writes) |
+| `get_code_bundle` | a file or symbol with everything it depends on |
+| `search_code` · `read_code` · `list_repos` | search and read your indexed repos |
+| `find_errors` · `explain_error` | grouped production errors; cause, failing code, the commit, a fix (Log Detective) |
 
-The prompt `copy` shows up as `/mcp__tracebase__copy` in Claude Code.
+The prompts `copy` and `why` show up as `/mcp__tracebase__copy` and `/mcp__tracebase__why` in Claude Code.
 
 > **Privacy:** Tracebase reads only your indexed repos and makes no internet requests. Your assistant is a different matter. If it runs a cloud model (Claude, OpenAI…), the code it reads through these tools is sent to that provider like anything else in your chat. For a fully local setup, use an Ollama model (`tracebase connect ollama` or `opencode`).
 
@@ -306,7 +308,8 @@ The prompt `copy` shows up as `/mcp__tracebase__copy` in Claude Code.
 
 ### Tech stack
 
-Python 3.12 · FastAPI · SQLite FTS5 · tree-sitter · numpy · APScheduler · React 19 + Vite · Docker (Debian 12)
+Python 3.12 · FastAPI · SQLite FTS5 (SQLCipher for encryption at rest) · tree-sitter · numpy · APScheduler ·
+React 19 + Vite · Docker (Debian 12)
 
 ---
 
@@ -332,7 +335,9 @@ make cli          # install the `tracebase` command (copy + MCP)
 
 For written answers, run `ollama pull llama3.1` (or any model).
 
-**On a cloud server** (AWS Lightsail / EC2 or any VPS, with HTTPS): see [deploy/README.md](deploy/README.md).
+**On a cloud server** (AWS Lightsail / EC2 or any VPS, with automatic HTTPS): one script sets up Docker, the
+firewall, team mode and a repo-sync cron; `--public-demo` adds a separate, isolated demo instance at
+`demo.<your domain>`. See [deploy/README.md](deploy/README.md).
 
 ### Configuration
 
@@ -343,8 +348,11 @@ For written answers, run `ollama pull llama3.1` (or any model).
 | `TRACEBASE_LLM_PROVIDER` | `ollama` | `ollama`, `openai` (any compatible server) or `none` |
 | `TRACEBASE_LLM_BASE_URL` | `http://localhost:11434` | |
 | `TRACEBASE_LLM_MODEL` | `llama3.1` | chat model (answers, explanations) |
-| `TRACEBASE_EMBED_PROVIDER` | `hash` | `hash` or `ollama` |
+| `TRACEBASE_LLM_API_KEY` | *(empty)* | sent as a Bearer token to an `openai`-compatible server |
+| `TRACEBASE_LLM_TIMEOUT` | `120` | seconds to wait for the LLM |
+| `TRACEBASE_EMBED_PROVIDER` · `TRACEBASE_EMBED_MODEL` | `hash` · `nomic-embed-text` | `hash` or `ollama` · the Ollama embedding model |
 | `TRACEBASE_WATCH_INTERVAL` | `60` | seconds between incremental re-index runs |
+| `TRACEBASE_MAX_FILE_KB` | `512` | larger files are not indexed |
 | `TRACEBASE_ADMIN_TOKEN` | *(empty)* | set it to turn on team mode (tokens, per-member repos, audit log) |
 | `TRACEBASE_LOGS_DIR` | `/volume1/logs` | log files to watch (Log Detective) |
 | `TRACEBASE_LOG_INTERVAL` | `15` | seconds between log collection runs |
@@ -358,23 +366,28 @@ For written answers, run `ollama pull llama3.1` (or any model).
 | `TRACEBASE_CORS_ORIGINS` | *(empty)* | other sites allowed to call the API (comma-separated) |
 | `TRACEBASE_DOCKER_LOGS` | `0` | `1`: also read `docker logs` of running containers |
 | `TRACEBASE_ALERT_WEBHOOK` | *(empty)* | optional: push alerts to your own ntfy / Slack webhook |
+| `TRACEBASE_SCHEDULER` | `1` | `0`: no background re-index, log collection or retention (tests, one-off runs) |
+| `TRACEBASE_FRONTEND_DIST` | `../frontend/dist` | built UI to serve (`/app/ui` in the image) |
+| `TRACEBASE_RUN_AS_ROOT` | `0` | Docker only: `1` keeps the container running as root instead of the `tracebase` user |
 
 ### API
 
 | Endpoint | |
 |---|---|
+| `GET /api/health` · `GET /api/stats` | version, LLM, scheduler, team mode · dashboard counts |
 | `GET /api/code/search?q=&repo=&language=&limit=` | hybrid search |
 | `GET /api/code/grep?pattern=&regex=` | exact / regex search |
 | `POST /api/code/ask` `{question, repo?}` | Q&A with citations |
 | `POST /api/code/explain` `{repo, path, line?}` | explain a function |
 | `GET /api/code/history?repo=&path=&line=` | git log / blame |
 | `GET /api/code/file`, `/api/code/repos`, `/api/code/tree`, `/api/code/secrets` | |
-| `POST /api/code/reindex` | |
+| `POST /api/code/reindex` · `GET /api/code/index-status` | re-index now · progress |
 | `POST /api/reuse/examples` `{task, project?}` | your best past implementations of a task |
 | `POST /api/reuse/bundle` `{repo, paths, project?, symbol?, renames?}` | a file + everything it needs, adapted to the project |
 | `GET /api/logs/groups?since=&service=&status=&q=` | error groups (`since`: "last night", "2h", "7d"…) |
 | `GET /api/logs/groups/E-5` · `POST …/explain` · `POST …/status` `{status}` | one group · its explanation · resolve / known / ignore |
 | `POST /api/logs/ingest?service=` | send logs: raw text, `{"lines": […]}` or `{"events": […]}` |
+| `POST /api/logs/collect` | read log files and Docker logs now (admin) |
 | `GET /api/logs/services`, `/api/logs/timeline`, `/api/logs/events`, `/api/logs/stats` | |
 | `GET /api/alerts?unread=` · `POST /api/alerts/read` | alerts |
 | `GET /api/team/me` | who you are and which repos you see |
@@ -410,8 +423,12 @@ backend/tracebase/
   reuse/             stack detection, finding past implementations, dependency bundles (PHP, JS/TS, Python,
                      Go, Java, Ruby), adapt.py (renames, Go module, Java package). No LLM
 cli/tracebase_cli/   `tracebase` command + MCP server: copy, merge, wiring, deps/.env, pending plans,
-                     `connect`, `login` / `team`, `errors` / `why` / `ingest` (talks to the server over HTTP)
-frontend/src/        React UI
+                     `connect`, `login` / `team`, `errors` / `why` / `ingest`, `data` (talks to the server over HTTP)
+frontend/src/        React UI: Dashboard, Search & Ask, Repositories, Log Detective, Secrets scan, Data & privacy
+deploy/              cloud server: docker-compose.prod.yml (Tracebase + Caddy HTTPS + optional public demo),
+                     setup.sh, repo-sync cron
+docker-entrypoint.sh drops root, keeps /data private (mode 700)
+PRIVACY.md           what is stored, redaction, retention, encryption, export and erase
 demo/seed.py         demo repos (Laravel, Node, Python, Go/Gin, Java/Spring, Rails, a git repo with history,
                      an old .zip) + workspace/booking-{api,go,java,rails}, fresh projects to copy into
                      + logs/: two nights of production logs with two incidents (`seed.py --logs` adds only those)
