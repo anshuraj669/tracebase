@@ -1,0 +1,70 @@
+# Publish tracebase-cli to PyPI with trusted publishing (no API token stored anywhere).
+#
+# Release:
+#   1. bump `version` in cli/pyproject.toml, commit, push
+#   2. git tag cli-v0.3.1 && git push origin cli-v0.3.1
+# The tag must match the version, the tests must pass, and the upload waits for the "pypi" environment
+# (add yourself as a required reviewer there to approve every release by hand).
+name: Publish CLI to PyPI
+
+on:
+  push:
+    tags: ["cli-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Tag matches the package version
+        run: |
+          version=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [ "${GITHUB_REF_NAME#cli-v}" != "$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match version $version in cli/pyproject.toml"
+            exit 1
+          fi
+
+      - name: Tests
+        run: |
+          uv venv -p 3.12 .venv
+          uv pip install -p .venv/bin/python -e . pytest
+          .venv/bin/python -m pytest -q tests
+
+      - name: Build
+        run: uv build --out-dir dist
+
+      - name: Check metadata
+        run: uvx twine check --strict dist/*
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: cli/dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/tracebase-cli/
+    permissions:
+      id-token: write   # trusted publishing: GitHub proves who it is to PyPI, no token needed
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
