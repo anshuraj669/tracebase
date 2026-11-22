@@ -5,16 +5,18 @@
 #   sudo ./deploy/setup.sh --domain tracebase-demo.duckdns.org            # your own repos (put them in /srv/tracebase/repos)
 #   sudo ./deploy/setup.sh --domain tracebase-demo.duckdns.org --demo     # public demo with the demo repos + logs
 #   sudo ./deploy/setup.sh --domain auto --demo                           # no domain yet: <public-ip>.sslip.io
+#   sudo ./deploy/setup.sh --public-demo                                  # + a separate demo instance at demo.<domain>
 #
 # Safe to run again (keeps the existing deploy/.env and admin token).
 set -euo pipefail
 
-DOMAIN="" DEMO=0
+DOMAIN="" DEMO=0 PUBLIC_DEMO=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --domain) DOMAIN="$2"; shift 2 ;;
     --demo) DEMO=1; shift ;;
-    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+    --public-demo) PUBLIC_DEMO=1; shift ;;
+    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -23,6 +25,7 @@ done
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$HERE")"
 ENV="$HERE/.env"
+PROFILE=()
 say() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 
 say "Installing Docker"
@@ -80,6 +83,17 @@ if [[ $DEMO -eq 1 ]]; then
   sed -i "s|^REPOS_DIR=.*|REPOS_DIR=$ROOT/demo/volume1/repos|; s|^LOGS_DIR=.*|LOGS_DIR=$ROOT/demo/volume1/logs|" "$ENV"
 fi
 
+# The public demo is a second, isolated Tracebase (own database) with only the demo data. Once enabled it stays on.
+if [[ $PUBLIC_DEMO -eq 1 ]] || grep -q '^DEMO_ADMIN_TOKEN=.' "$ENV"; then
+  say "Public demo instance"
+  [[ -d "$ROOT/demo/volume1/repos" ]] || python3 "$ROOT/demo/seed.py" >/dev/null
+  BASE="$(grep '^DOMAIN=' "$ENV" | cut -d= -f2-)"
+  grep -q '^DEMO_DOMAIN=' "$ENV" || echo "DEMO_DOMAIN=demo.$BASE" >> "$ENV"
+  grep -q '^DEMO_ADMIN_TOKEN=.' "$ENV" || { sed -i '/^DEMO_ADMIN_TOKEN=/d' "$ENV"; echo "DEMO_ADMIN_TOKEN=$(openssl rand -hex 32)" >> "$ENV"; }
+  PROFILE=(--profile demo)
+  echo "demo at https://$(grep '^DEMO_DOMAIN=' "$ENV" | cut -d= -f2-)  (create the visitor token: see deploy/README.md)"
+fi
+
 say "Firewall"
 if command -v ufw >/dev/null; then
   ufw allow OpenSSH >/dev/null; ufw allow 80/tcp >/dev/null; ufw allow 443/tcp >/dev/null
@@ -89,7 +103,7 @@ echo "also open ports 80 and 443 in the AWS console (Lightsail: Networking tab Â
 
 say "Building and starting (first build takes a few minutes)"
 cd "$HERE"
-docker compose -f docker-compose.prod.yml --env-file "$ENV" up -d --build
+docker compose -f docker-compose.prod.yml --env-file "$ENV" "${PROFILE[@]}" up -d --build
 
 say "Repo sync every 15 minutes (git pull of everything in REPOS_DIR)"
 install -m 0755 "$HERE/pull-repos.sh" /usr/local/bin/tracebase-pull-repos

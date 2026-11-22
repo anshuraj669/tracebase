@@ -47,6 +47,25 @@ services:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
 
+  # Optional public demo: a separate Tracebase with only the demo data (demo/seed.py) and its own database, so a
+  # public demo token can never see the real instance. Started by setup.sh --public-demo (compose profile "demo").
+  tracebase-demo:
+    build: ..
+    profiles: ["demo"]
+    restart: unless-stopped
+    expose: ["8080"]
+    volumes:
+      - ../demo/volume1/repos:/volume1/repos:ro
+      - ../demo/volume1/logs:/volume1/logs:ro
+      - tracebase-demo-data:/data
+    environment:
+      TRACEBASE_ADMIN_TOKEN: "${DEMO_ADMIN_TOKEN:-}"
+      TRACEBASE_LLM_PROVIDER: none
+      TRACEBASE_WATCH_INTERVAL: 3600
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
   caddy:
     image: caddy:2.8
     restart: unless-stopped
@@ -56,6 +75,7 @@ services:
       - "${HTTPS_PORT:-443}:443"
     environment:
       DOMAIN: "${DOMAIN:?set DOMAIN in deploy/.env, e.g. tracebase-demo.duckdns.org}"
+      DEMO_DOMAIN: "${DEMO_DOMAIN:-demo.localhost}"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data        # HTTPS certificates: keep this volume
@@ -66,5 +86,6 @@ services:
 
 volumes:
   tracebase-data:
+  tracebase-demo-data:
   caddy-data:
   caddy-config:

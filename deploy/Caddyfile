@@ -18,3 +18,23 @@
 
 	reverse_proxy tracebase:8080
 }
+
+# Public demo instance (only when setup.sh --public-demo started it). DEMO_DOMAIN defaults to demo.localhost,
+# which never gets a public certificate, so this block is harmless when the demo is off.
+{$DEMO_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	request_body {
+		max_size 2MB
+	}
+
+	reverse_proxy tracebase-demo:8080
+}

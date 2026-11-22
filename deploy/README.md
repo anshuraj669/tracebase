@@ -119,6 +119,22 @@ Or rsync/scp log files into `/srv/tracebase/logs`: they're tailed automatically.
 If you switch from `--demo` to your own data, set `REPOS_DIR` / `LOGS_DIR` in `deploy/.env` back to
 `/srv/tracebase/…` and re-run `sudo ./deploy/setup.sh`.
 
+## Public demo (optional)
+
+A second, isolated Tracebase with only the demo data and its own database, at `demo.<your domain>` (DuckDNS
+and most DNS setups resolve sub-names automatically; otherwise add an `A` record for `demo.`):
+
+```bash
+sudo ./deploy/setup.sh --public-demo
+# then create the token you publish (it can only ever see the demo instance):
+T=$(sudo grep ^DEMO_ADMIN_TOKEN= deploy/.env | cut -d= -f2-)
+curl -s https://demo.<your domain>/api/team/users -H "Authorization: Bearer $T" \
+  -H "Content-Type: application/json" -d '{"name": "visitor", "repos": ["*"]}'
+```
+
+It uses about 200 MB of RAM. Rotate the visitor token if it gets abused: `tracebase team rotate visitor` with the
+demo admin token.
+
 ## Day to day
 
 ```bash

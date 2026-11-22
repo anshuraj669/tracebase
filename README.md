@@ -3,6 +3,20 @@
 **Self-hosted AI for your code, logs and backups.**
 Your code, your logs and your backups in one private AI. Nothing leaves your network.
 
+![Tracebase: search your old projects by meaning, ask questions, get answers with file:line citations](docs/media/demo.gif)
+
+### Try it
+
+**Live demo:** [demo.tracebase.duckdns.org](https://demo.tracebase.duckdns.org): paste the token
+`tb_escsEwbpgDuxtXQ9xIxKT30IyXzO3_Mp` when asked. It holds sample projects (Laravel, Node, Python, Go, Java,
+Rails) and sample production logs with two incidents. Try *"send password reset email"* in Search, or open
+Log Detective.
+
+**Run it yourself:** `git clone` this repo, then `python3 demo/seed.py && docker compose up --build` and open http://localhost:8080 (see [Run it](#run-it)).
+
+**From your AI agent:** `pip install tracebase-cli`, then `tracebase connect claude` (or codex, gemini,
+opencode, cursor). See [MCP](#use-it-from-your-ai-agent-in-the-terminal-mcp).
+
 Self-hosted. Runs on a NAS, a home server or any machine with Docker. Built in public, in phases:
 
 | Phase | Part | Status |
@@ -405,4 +419,6 @@ demo/seed.py         demo repos (Laravel, Node, Python, Go/Gin, Java/Spring, Rai
 
 ## License
 
-Copyright (c) 2026 Anshu Raj. All rights reserved. This code is published for viewing only; copying, modifying or redistributing it is not permitted. See [LICENSE](LICENSE).
+[Functional Source License 1.1, Apache 2.0 future license (FSL-1.1-ALv2)](LICENSE.md). You may use, run, self-host
+and modify Tracebase for any purpose except offering a product or service that competes with it. Each release
+becomes Apache 2.0 (fully open source) two years after it is published.
