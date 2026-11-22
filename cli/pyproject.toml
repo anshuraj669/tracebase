@@ -1,6 +1,6 @@
 [project]
 name = "tracebase-cli"
-version = "0.3.0"
+version = "0.3.1"
 description = "CLI and MCP server for Tracebase: find code you already wrote in your old projects, copy it into the current one, and explain production errors."
 readme = "README.md"
 requires-python = ">=3.10"

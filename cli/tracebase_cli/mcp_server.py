@@ -19,7 +19,7 @@ except ImportError:  # mcp 1.x
     from mcp.server.fastmcp import Context, FastMCP
     from mcp.types import ToolAnnotations
 
-from . import plans, project, reuse
+from . import __version__, plans, project, reuse
 from .client import Client, TracebaseError
 from .ui import diff
 
@@ -84,7 +84,11 @@ def _applied(workspace: Path, plan: dict, done: list[tuple[str, str]]) -> str:
 
 
 def build_server(api: Client, workspace: Path | None = None) -> FastMCP:
-    mcp = FastMCP("tracebase", instructions=INSTRUCTIONS)
+    try:  # mcp >= 2
+        mcp = FastMCP("tracebase", instructions=INSTRUCTIONS, version=__version__)
+    except TypeError:  # mcp 1.x: no version argument, set it on the low-level server
+        mcp = FastMCP("tracebase", instructions=INSTRUCTIONS)
+        mcp._mcp_server.version = __version__
     workspace = (workspace or Path(os.environ.get("TRACEBASE_WORKSPACE") or os.getcwd())).resolve()
 
     def ctx(task: str = "", n: int = 2) -> dict | None:

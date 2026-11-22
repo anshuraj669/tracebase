@@ -50,3 +50,11 @@ def test_explain_error_gives_cause_code_commit_and_fix():
     assert ">>   57 $code  = $cart['coupon'];" in out
     assert "commit f971906" in out and "22 min before the first error" in out
     assert "?? null" in out and "deploy: deployed shop-api" in out
+
+
+def test_server_reports_package_version():
+    from tracebase_cli import __version__
+
+    server = mcp_server.build_server(api=FakeApi())
+    low = getattr(server, "_lowlevel_server", None) or getattr(server, "_mcp_server", None)
+    assert __version__ and low.version == __version__
