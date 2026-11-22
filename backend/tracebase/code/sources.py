@@ -188,8 +188,9 @@ def get_source(repo: str) -> Source | None:
     # compare the *normalised* path, not the fully resolved one.
     if not repo or Path(repo).is_absolute() or ".." in Path(repo).parts:
         return None
+    from ..privacy import is_excluded_repo
     from ..team import can
-    if not can(repo):  # team mode: outside this member's repos
+    if not can(repo) or is_excluded_repo(repo):  # team mode: outside this member's repos / forgotten repo
         return None
     p = root / repo
     if not os.path.normpath(p).startswith(os.path.normpath(root) + os.sep):

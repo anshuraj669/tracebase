@@ -33,6 +33,7 @@ class User:
 
 
 LOCAL = User("local", "admin")
+ANONYMOUS = User("anonymous", "member", ())  # no token, on the few open paths (health, the UI's files)
 _current: ContextVar[User] = ContextVar("tracebase_user", default=LOCAL)
 
 
@@ -197,11 +198,11 @@ async def authenticate(request: Request) -> None:
     if not enabled():
         set_current(LOCAL)
         return
-    if not path.startswith("/api/") or path in OPEN:
-        set_current(User("anonymous", "member", ()))
-        return
     auth = request.headers.get("authorization", "")
     token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""  # never in the URL: it would end up in logs
+    if not path.startswith("/api/") or path in OPEN:
+        set_current((from_token(token) if token else None) or ANONYMOUS)
+        return
     user = from_token(token) if token else None
     if not user:
         raise HTTPException(401, "Tracebase is in team mode: send `Authorization: Bearer <token>` "

@@ -6,6 +6,7 @@ import logging
 import threading
 import time
 from collections import Counter
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from ..db import connect, rows, tx
@@ -18,6 +19,17 @@ from .sources import Source, discover, sha1
 log = logging.getLogger(__name__)
 _lock = threading.Lock()
 status: dict = {"running": False, "last_run": None, "last_stats": None, "current": None}
+
+
+@contextmanager
+def lock(timeout: float = 600):
+    """Hold the indexer lock (privacy deletes wait for a running index pass, so it can't re-add what they remove)."""
+    got = _lock.acquire(timeout=timeout)
+    try:
+        yield
+    finally:
+        if got:
+            _lock.release()
 
 
 def _now() -> str:
@@ -107,7 +119,9 @@ def index_all(force: bool = False) -> dict:
     try:
         status["running"] = True
         t0 = time.time()
-        repos = discover()
+        from ..privacy import excluded_repos, is_excluded_repo
+        ex = excluded_repos()
+        repos = {n: s for n, s in discover().items() if not is_excluded_repo(n, ex)}
         result: dict = {"repos": {}}
         for name, src in repos.items():
             status["current"] = name

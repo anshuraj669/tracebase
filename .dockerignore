@@ -5,3 +5,7 @@ frontend/dist
 demo/volume1
 .git
 .idea
+deploy/.env
+**/.env
+**/data
+**/*.db

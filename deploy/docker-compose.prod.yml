@@ -20,6 +20,23 @@ services:
       TRACEBASE_LLM_MODEL: ${LLM_MODEL:-llama3.1}
       TRACEBASE_ALERT_WEBHOOK: ${ALERT_WEBHOOK:-}
       TRACEBASE_WATCH_INTERVAL: ${WATCH_INTERVAL:-300}
+      # Privacy (see PRIVACY.md): encryption at rest, redaction of personal data in logs, retention
+      TRACEBASE_DB_KEY: "${DB_KEY:-}"                           # empty = not encrypted (protect the disk instead)
+      TRACEBASE_REDACT: ${REDACT:-1}
+      TRACEBASE_REDACT_IPS: ${REDACT_IPS:-1}
+      TRACEBASE_REDACT_EXTRA: ${REDACT_EXTRA:-}
+      TRACEBASE_LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-30}
+      TRACEBASE_ERROR_RETENTION_DAYS: ${ERROR_RETENTION_DAYS:-90}
+      TRACEBASE_ALERT_RETENTION_DAYS: ${ALERT_RETENTION_DAYS:-90}
+      TRACEBASE_AUDIT_RETENTION_DAYS: ${AUDIT_RETENTION_DAYS:-365}
+    # no access log: URLs carry search terms and error ids; real client IPs come from Caddy
+    command: ["uvicorn", "tracebase.main:app", "--host", "0.0.0.0", "--port", "8080", "--no-server-header",
+              "--no-access-log", "--proxy-headers", "--forwarded-allow-ips", "*"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE", "FOWNER"]   # only for the entrypoint's one-time chown
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health', timeout=5)"]
       interval: 30s

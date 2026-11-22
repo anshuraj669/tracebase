@@ -133,6 +133,57 @@ class Client:
     def read_alerts(self) -> dict:
         return self._req("POST", "/api/alerts/read", json={})
 
+    # ------------------------------------------------------------ data & privacy (admin)
+    def data_summary(self) -> dict:
+        return self._req("GET", "/api/data/summary")
+
+    def data_prune(self) -> dict:
+        return self._req("POST", "/api/data/prune")
+
+    def forget_repo(self, name: str) -> dict:
+        return self._req("DELETE", f"/api/data/repos/{name}")
+
+    def restore_repo(self, name: str) -> dict:
+        return self._req("POST", f"/api/data/repos/{name}/restore")
+
+    def forget_service(self, name: str, exclude: bool = False) -> dict:
+        return self._req("DELETE", f"/api/data/services/{name}", params={"exclude": "true"} if exclude else None)
+
+    def restore_service(self, name: str) -> dict:
+        return self._req("POST", f"/api/data/services/{name}/restore")
+
+    def purge(self, match: str, service: str | None = None, dry_run: bool = False) -> dict:
+        return self._req("POST", "/api/data/purge", json={"match": match, "service": service, "dry_run": dry_run})
+
+    def wipe(self, keep_team: bool = True) -> dict:
+        return self._req("POST", "/api/data/wipe", json={"confirm": "delete everything", "keep_team": keep_team})
+
+    def export(self, out, service: str | None = None, match: str | None = None) -> int:
+        """Stream the NDJSON export into the file object `out`; returns the number of records."""
+        params = {k: v for k, v in {"service": service, "match": match}.items() if v}
+        n = 0
+        try:
+            with self.http.stream("GET", "/api/data/export", params=params) as r:
+                if r.status_code >= 400:
+                    r.read()
+                    self._raise(r)
+                for line in r.iter_lines():
+                    if line:
+                        out.write(line + "\n")
+                        n += 1
+        except httpx.ConnectError as e:
+            raise TracebaseError(f"Cannot reach Tracebase at {self.url}. Is it running?") from e
+        return max(n - 1, 0)  # minus the header line
+
+    def _raise(self, r: httpx.Response) -> None:
+        if r.status_code == 401:
+            raise TracebaseError(f"{self.url} is a team server and needs your token: run `tracebase login <token>`")
+        try:
+            detail = r.json().get("detail")
+        except ValueError:
+            detail = r.text[:300]
+        raise TracebaseError(f"{r.status_code}: {detail}")
+
     def event(self, action: str, repo: str | None, **detail) -> None:
         """Best effort: tell a team server what was written (audit log). Never fails the copy."""
         try:

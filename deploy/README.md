@@ -74,7 +74,12 @@ token.
 
 ```bash
 sudo grep ADMIN_TOKEN ~/tracebase/deploy/.env     # your admin token: keep it to yourself
+sudo grep DB_KEY ~/tracebase/deploy/.env          # the database encryption key: copy it to a password manager now
 ```
+
+The database is encrypted with `DB_KEY` (SQLCipher). Without the key it can't be opened, so keep a copy off the
+server. Upgrading a server set up before encryption existed: `setup.sh` adds a key and the existing database is
+encrypted on the next start.
 
 ## 5. Give people access
 
@@ -124,7 +129,10 @@ sudo ./setup.sh                                            # after copying new c
 ```
 
 - **Backups:** Lightsail → Snapshots → enable automatic snapshots (the database is in the Docker volume on that
-  disk). The repos can always be cloned again.
+  disk). The repos can always be cloned again. Snapshots of an encrypted database need `DB_KEY` to restore.
+  Delete snapshots from before encryption was turned on: they hold the plain database.
+- **Data & privacy:** `tracebase data` shows what is stored. `tracebase data purge <text>` erases a customer's
+  data. Retention, redaction and encryption are set in `deploy/.env`. See [../PRIVACY.md](../PRIVACY.md).
 - **Costs:** a 2–4 GB Lightsail server is about $12–24 a month, plus a domain if you buy one. AWS's free tier for
   new accounts changes over time, so check the current Lightsail / EC2 offers before you pick a plan.
 - **AI explanations:** `LLM_PROVIDER=none` (the default here) uses the built-in rules, which work well on a
@@ -137,3 +145,7 @@ sudo ./setup.sh                                            # after copying new c
 - A member can send logs for their own services, so give a public demo token access to a demo service only.
 - Hosting a client's code on **your** server makes you responsible for it. For a client, run this in **their**
   AWS account.
+- Personal data in logs (emails, IPs, card numbers, tokens) is redacted before it is stored. Add your own
+  identifiers with `REDACT_EXTRA` in `deploy/.env`.
+- The container runs as an unprivileged user on a read-only filesystem, with no HTTP access log.
+  Lightsail encrypts its disks; on EC2 turn on EBS encryption; elsewhere use LUKS: that also covers `/srv/tracebase`.
