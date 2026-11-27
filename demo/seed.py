@@ -276,6 +276,56 @@ def shop_api() -> None:
     git(r, "commit", "-q", "-am", "Cart: null-safe coupon lookup", date="2026-10-28T16:20:00")
     (r / "app/Services/CartService.php").write_text(cs)
     git(r, "commit", "-q", "-am", "Refactor applyDiscount for promo campaign (BLACKFRIDAY)", date="2026-11-08T13:42:00")
+    # the new checkout shipped "dark" behind a Flagsmith flag: the code is weeks old, turning the flag on activates it
+    w(r / "app/Services/CheckoutV2.php", """
+        <?php
+
+        namespace App\\Services;
+
+        use App\\Models\\User;
+        use Flagsmith\\Flagsmith;
+
+        /**
+         * New checkout: prices shown and charged in the shopper's currency.
+         * Rolled out with the `new_checkout` feature flag.
+         */
+        class CheckoutV2
+        {
+            public function __construct(private Flagsmith $flags, private CartService $carts, private FxRates $fx)
+            {
+            }
+
+            public function total(array $cart, User $user): float
+            {
+                $total = $this->carts->total($cart);
+                $flags = $this->flags->getIdentityFlags($user->email);
+                if ($flags->isFeatureEnabled('new_checkout')) {
+                    $rates = $this->fx->latest();
+                    $rate  = $rates[$cart['currency']];
+                    return round($total * $rate, 2);
+                }
+                return $total;
+            }
+        }
+    """)
+    w(r / "app/Services/FxRates.php", """
+        <?php
+
+        namespace App\\Services;
+
+        use Illuminate\\Support\\Facades\\Cache;
+        use Illuminate\\Support\\Facades\\Http;
+
+        class FxRates
+        {
+            public function latest(): array
+            {
+                return Cache::remember('fx:latest', 3600, fn () => Http::get(config('services.fx.url'))->json('rates'));
+            }
+        }
+    """)
+    git(r, "add", "-A")
+    git(r, "commit", "-q", "-m", "Checkout v2: charge in the shopper's currency (behind new_checkout flag)", date="2026-11-02T11:05:00")
 
 
 def clinic_app() -> None:

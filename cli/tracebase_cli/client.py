@@ -120,6 +120,20 @@ class Client:
     def explain_error(self, gid: str, refresh: bool = False) -> dict:
         return self._req("POST", f"/api/logs/groups/{gid}/explain", params={"refresh": "true"} if refresh else None)
 
+    def error_flags(self, gid: str) -> dict:
+        return self._req("GET", f"/api/logs/groups/{gid}/flags")
+
+    def rollback_flag(self, gid: str, change_id: int) -> dict:
+        return self._req("POST", f"/api/logs/groups/{gid}/rollback", json={"change_id": change_id, "confirm": True})
+
+    def flag_changes(self, feature: str | None = None, environment: str | None = None, since: str | None = None,
+                     limit: int = 30) -> list[dict]:
+        return self._req("GET", "/api/flags/changes", params={k: v for k, v in {
+            "feature": feature, "environment": environment, "since": since, "limit": limit}.items() if v})
+
+    def flag_where(self, feature: str) -> list[dict]:
+        return self._req("GET", "/api/flags/where", params={"feature": feature})
+
     def set_error_status(self, gid: str, status: str) -> dict:
         return self._req("POST", f"/api/logs/groups/{gid}/status", json={"status": status})
 

@@ -189,7 +189,7 @@ def audit(user: str | None = None, action: str | None = None, limit: int = 100) 
 
 
 # ------------------------------------------------------------------ FastAPI dependency
-OPEN = ("/api/health",)
+OPEN = ("/api/health", "/api/flags/webhook")  # the webhook checks its own signature
 
 
 async def authenticate(request: Request) -> None:

@@ -39,10 +39,19 @@ is failing, or about an error ("why did checkout fail last night?", "what's E-5?
 2. call explain_error for the relevant one: the likely cause, the failing code from their repos, the commit that
    last changed that line, what happened in other services at the same time, and a suggested fix,
 3. explain it to them. If they want it fixed, edit the code in the current project as usual (show the change first).
-Never paste their logs into a web search."""
+Never paste their logs into a web search.
+
+Feature flags (Flagsmith): explain_error also names flag changes made just before an error, and whether the failing
+code runs behind that flag. When a flag is the likely cause, turning it off is the fastest mitigation (no deploy):
+say so, ASK the user, and only if they agree call rollback_flag. Tracebase asks the user again when it can.
+flag_history shows recent flag changes and where the code checks a flag."""
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False)
 WRITES = ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=False)
+
+
+class FlagApproval(BaseModel):
+    turn_off: bool = Field(default=True, description="Turn this feature flag off now")
 
 
 class Approval(BaseModel):
@@ -206,12 +215,83 @@ def build_server(api: Client, workspace: Path | None = None) -> FastMCP:
             cm = r["commit"]
             out.append(f"\nThat line was last changed by commit {cm['sha']} \"{cm['message']}\" ({cm['author']}, {cm['date']}"
                        + (f", {cm['minutes_before_first_error']} min before the first error" if cm.get("minutes_before_first_error") is not None else "") + ")")
+        for f in r.get("flags") or []:
+            ch = f["change"]
+            m = f["minutes_before_first_error"]
+            out.append(f"\nFeature flag '{ch['feature']}' was {ch['summary']} in {ch.get('environment')}"
+                       + (f" (segment {ch['segment']})" if ch.get("segment") else "")
+                       + (f" by {ch['changed_by']}" if ch.get("changed_by") else "")
+                       + (f", {m} min before the errors started" if m >= 0 else f", {-m} min after the errors started") + ".")
+            if f.get("link") and f.get("flag_check"):
+                fc = f["flag_check"]
+                out.append(f"Tie to the failing code: {f['link_reason']} ({fc['repo']}/{fc['path']}:{fc['line']}: {fc['text'][:100]})")
+            if f.get("can_roll_back"):
+                out.append(f"It can be turned off from Tracebase: ask the user, then rollback_flag(\"{gid}\").")
         if r.get("fix"):
             out.append("\nSuggested fix:")
             out += [f"{i}. {f}" for i, f in enumerate(r["fix"], 1)]
         if g.get("samples"):
             out.append("\nSample log line:\n" + g["samples"][0]["message"][:800])
         return "\n".join(out)
+
+    @mcp.tool(annotations=READ_ONLY)
+    def flag_history(feature: str | None = None, since: str | None = "7d", environment: str | None = None,
+                     limit: int = 20) -> str:
+        """Recent feature flag changes from Flagsmith (who turned what on or off, rollout and value changes), newest
+        first, and, when `feature` is given, where the developer's code checks that flag."""
+        try:
+            changes = api.flag_changes(feature, environment, since, limit)
+            refs = api.flag_where(feature) if feature else []
+        except TracebaseError as e:
+            return f"Tracebase error: {e}"
+        out = [f"{c['ts']} {c['feature']} in {c.get('environment')}"
+               + (f" (segment {c['segment']})" if c.get("segment") else "") + f": {c['summary']}"
+               + (f" by {c['changed_by']}" if c.get("changed_by") else "")
+               + (" [rollback by Tracebase]" if c.get("source") == "tracebase" else "") for c in changes]
+        if not out:
+            out = ["No flag changes" + (f" since {since}" if since else "") + "."]
+        if refs:
+            out.append(f"\nWhere the code checks '{feature}':")
+            out += [f"- {r['repo']}/{r['path']}:{r['line']}: {r['text'][:120]}" for r in refs[:10]]
+        return "\n".join(out)
+
+    @mcp.tool(annotations=WRITES)
+    async def rollback_flag(error_id: str, user_confirmed: bool = False, ctx: Context | None = None) -> str:
+        """Turn OFF, in Flagsmith, the feature flag that explain_error named as the likely cause of an error group
+        (a kill switch: no deploy). Only after the user agreed. Asks the user to confirm through the agent's approval
+        prompt when the agent supports it; set user_confirmed=true ONLY if the user explicitly said yes. Tracebase
+        then watches the error and marks it resolved if it stops."""
+        gid = error_id.strip().upper()
+        gid = gid if gid.startswith("E-") else f"E-{gid}"
+        try:
+            info = api.error_flags(gid)
+        except TracebaseError as e:
+            return f"Tracebase error: {e}"
+        s = next((x for x in info.get("suspects") or [] if x.get("can_roll_back")), None)
+        if not s:
+            return f"No feature flag that was turned on before {gid} can be turned off. Nothing changed."
+        if not info.get("can_change_flags"):
+            return "Tracebase is not connected to the Flagsmith API (TRACEBASE_FLAGSMITH_URL / _API_KEY). Nothing changed."
+        ch = s["change"]
+        where = (ch.get("environment") or "?") + (f" (segment {ch['segment']})" if ch.get("segment") else "")
+        if can_elicit(ctx):
+            res = await ctx.elicit(f"Tracebase: turn off the feature flag '{ch['feature']}' in {where}? It was "
+                                   f"{ch['summary']} {s['minutes_before_first_error']} min before {gid} started.",
+                                   FlagApproval)
+            if res.action != "accept" or not getattr(res.data, "turn_off", False):
+                return f"The user declined. The flag '{ch['feature']}' was not changed."
+        elif not user_confirmed:
+            return (f"Not changed: ask the user whether to turn off '{ch['feature']}' in {where}. If they say yes, call "
+                    f"rollback_flag again with user_confirmed=true, or they can run `tracebase why {gid} --rollback`.")
+        try:
+            r = api.rollback_flag(gid, ch["id"])
+        except TracebaseError as e:
+            return f"Tracebase error: {e}"
+        if r.get("already"):
+            return f"'{ch['feature']}' was already turned off by Tracebase; {gid} is being watched."
+        return (f"Turned off '{ch['feature']}' in {where}. Tracebase watches {gid} for {r.get('watch_minutes', 5)} "
+                "minutes and marks it resolved if no new errors arrive. The code still has the bug: suggest the fix "
+                "so the flag can be turned back on safely.")
 
     @mcp.tool(annotations=READ_ONLY)
     def get_code_bundle(repo: str, path: str, symbol: str | None = None) -> str:

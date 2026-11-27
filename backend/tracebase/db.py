@@ -133,6 +133,40 @@ CREATE TABLE IF NOT EXISTS alerts (
 );
 CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at);
 
+-- ---------- Feature flags (flags/) ----------
+CREATE TABLE IF NOT EXISTS flag_changes (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    provider TEXT DEFAULT 'flagsmith',
+    project TEXT, project_id INTEGER,
+    environment TEXT, environment_id INTEGER,
+    feature TEXT NOT NULL, feature_id INTEGER,
+    segment TEXT, segment_id INTEGER,
+    identity TEXT,
+    enabled_before INTEGER, enabled_after INTEGER,
+    value_before TEXT, value_after TEXT,
+    rollout_before TEXT, rollout_after TEXT,
+    summary TEXT,
+    changed_by TEXT,
+    source TEXT DEFAULT 'webhook',
+    dedupe_key TEXT UNIQUE
+);
+CREATE INDEX IF NOT EXISTS idx_flag_changes_ts ON flag_changes(ts);
+CREATE INDEX IF NOT EXISTS idx_flag_changes_feature ON flag_changes(feature, ts);
+CREATE TABLE IF NOT EXISTS flag_rollbacks (
+    id INTEGER PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    group_id INTEGER,
+    change_id INTEGER,
+    feature TEXT, environment TEXT, segment TEXT,
+    feature_state_id INTEGER,
+    approved_by TEXT,
+    status TEXT DEFAULT 'watching',     -- watching | worked | did_not_help | failed
+    errors_before INTEGER, errors_after INTEGER,
+    checked_at TEXT,
+    note TEXT
+);
+
 -- ---------- Shared ----------
 CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,

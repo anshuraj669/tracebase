@@ -11,6 +11,7 @@ from .code.indexer import index_all
 from .config import settings
 from .logs.collector import collect_docker, collect_files, docker_available
 from . import privacy
+from .flags.rollback import verify as verify_flag_rollbacks
 
 log = logging.getLogger(__name__)
 scheduler: BackgroundScheduler | None = None
@@ -43,6 +44,7 @@ def start() -> None:
                       next_run_time=datetime.now() + timedelta(seconds=4))
     if docker_available():
         scheduler.add_job(_safe(collect_docker), "interval", seconds=max(settings.log_interval * 2, 15), id="logs:docker")
+    scheduler.add_job(_safe(verify_flag_rollbacks), "interval", seconds=30, id="flags:verify-rollbacks")
     scheduler.add_job(_safe(privacy.prune), "cron", hour=4, minute=30, id="privacy:retention",
                       next_run_time=datetime.now() + timedelta(seconds=30))
     scheduler.start()

@@ -28,3 +28,7 @@ docs/
 
 # Python package builds
 cli/dist/
+
+# flags demo state (Flagsmith API key, webhook secret)
+demo/.flags-demo.json
+/.env

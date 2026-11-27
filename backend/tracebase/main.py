@@ -27,7 +27,8 @@ from .db import encrypted, row, rows
 from .embeddings import embedder
 from .llm import LLMUnavailable, llm
 from .logs import collector, grouper
-from .logs.explain import explain_group
+from .logs.explain import code_context, explain_group
+from .flags import flagsmith as flagsmith_api, rollback as flag_rollback, store as flag_store, suspects as flag_suspects
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -375,6 +376,82 @@ def logs_events(group: str | None = None, service: str | None = None, level: str
         where.append("message LIKE ?")
         p.append(f"%{q}%")
     return rows(f"SELECT * FROM log_events WHERE {' AND '.join(where)} ORDER BY ts DESC, id DESC LIMIT ?", (*p, limit))
+
+
+# ---------------------------------------------------------------- feature flags (Flagsmith): a cause, and a kill switch
+@app.post("/api/flags/webhook")
+async def flags_webhook(request: Request) -> dict:
+    """Flagsmith environment webhook. Signed with the webhook secret (X-Flagsmith-Signature) when one is set; in team
+    mode a secret (or an admin token) is required, since this path is open to Flagsmith without a Tracebase token."""
+    body = await request.body()
+    if len(body) > 1024 * 1024:
+        raise HTTPException(413, "webhook body too large")
+    secret = settings.flagsmith_webhook_secret
+    if secret:
+        if not flag_store.valid_signature(body, request.headers.get("x-flagsmith-signature"), secret):
+            raise HTTPException(401, "bad X-Flagsmith-Signature (check TRACEBASE_FLAGSMITH_WEBHOOK_SECRET)")
+    elif team.enabled() and not team.current().is_admin:
+        raise HTTPException(401, "set TRACEBASE_FLAGSMITH_WEBHOOK_SECRET and the same secret on the Flagsmith webhook")
+    try:
+        payload = json.loads(body or b"null")
+    except ValueError:
+        raise HTTPException(400, "invalid JSON")
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "expected a Flagsmith webhook payload")
+    change = flag_store.parse_flagsmith(payload)
+    if not change:
+        return {"ok": True, "ignored": payload.get("event_type")}
+    stored = await run_in_threadpool(flag_store.record, change)
+    return {"ok": True, "recorded": bool(stored), "change": stored}
+
+
+@app.get("/api/flags/status")
+def flags_status() -> dict:
+    last = flag_store.history(limit=1)
+    return {"flagsmith_url": settings.flagsmith_url or None, "can_change_flags": flagsmith_api.configured(),
+            "webhook_signed": bool(settings.flagsmith_webhook_secret), "last_change": last[0] if last else None}
+
+
+@app.get("/api/flags/changes")
+def flags_changes(feature: str | None = None, environment: str | None = None, since: str | None = None,
+                  limit: int = Query(100, le=1000)) -> list[dict]:
+    from .timeutil import iso, parse_since
+    s = parse_since(since) if since else None
+    return flag_store.history(feature, environment, iso(s) if s else None, limit=limit)
+
+
+@app.get("/api/flags/where")
+def flags_where(feature: str) -> list[dict]:
+    """Where the code checks a flag (its name in quotes), in the repos the caller may see."""
+    return flag_suspects.flag_refs(feature)
+
+
+@app.get("/api/logs/groups/{gid}/flags")
+def logs_group_flags(gid: str) -> dict:
+    g = _group_or_404(gid)
+    code = code_context(g["frames"], g["service"])
+    return {"group": g["code"], "suspects": flag_suspects.for_group(g, code),
+            "rollbacks": flag_store.rollbacks(g["id"]), "can_change_flags": flagsmith_api.configured()}
+
+
+class RollbackReq(BaseModel):
+    change_id: int
+    confirm: bool = False      # the person approved turning the flag off
+
+
+@app.post("/api/logs/groups/{gid}/rollback")
+def logs_group_rollback(gid: str, body: RollbackReq) -> dict:
+    """Turn off the flag a change turned on (after the person approved it), then watch whether the error stops."""
+    team.require_admin()
+    g = _group_or_404(gid)
+    if not body.confirm:
+        raise HTTPException(400, "a flag is only changed with confirm=true, after the person approved it")
+    if not flagsmith_api.configured():
+        raise HTTPException(409, "Flagsmith is not connected: set TRACEBASE_FLAGSMITH_URL and TRACEBASE_FLAGSMITH_API_KEY")
+    try:
+        return flag_rollback.apply(g["id"], body.change_id, approved_by=team.current().name)
+    except flag_rollback.RollbackError as e:
+        raise HTTPException(502, str(e))
 
 
 @app.get("/api/alerts")

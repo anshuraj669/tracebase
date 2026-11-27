@@ -35,6 +35,67 @@ what is stored. The container runs as a non-root user and keeps `/data` private 
 
 ---
 
+## Feature flags: Flagsmith in Log Detective
+
+Bad releases are often a flag flip, not a deploy. Tracebase reads every flag change from
+[Flagsmith](https://github.com/Flagsmith/flagsmith) (self-hosted or SaaS) and treats it as a possible cause:
+
+1. **Flag changes on the timeline.** A signed Flagsmith webhook sends each change (turned on/off, value, % rollout,
+   segment overrides, who did it) to Tracebase. They show on the error timeline and in `tracebase flags`.
+2. **Flags as suspects in "why".** When an error group starts, flag changes just before it are ranked by time and
+   by how they tie to the failing code: Tracebase finds where your code checks the flag (its name in quotes) and
+   tells you when the failing line runs *behind that check*.
+3. **Kill switch, with your approval.** `tracebase why E-6 --rollback`, the **Turn off** button, or your AI agent
+   (MCP `rollback_flag`, which asks you first) turns the flag off through the Flagsmith API. Tracebase then watches
+   the error: if it stops, it is marked **resolved by the rollback**; if not, an alert says the flag wasn't the cause.
+4. **For AI agents.** `explain_error` names the flag, `flag_history` shows changes and where the code checks a
+   flag, and `rollback_flag` is the approved kill switch.
+
+```text
+$ tracebase why E-6
+Why
+  Feature flag 'new_checkout' was turned on in Production by demo@tracebase.local in the minute the errors
+  started, and the failing code runs only behind that flag (app/Services/CheckoutV2.php:22:
+  `if ($flags->isFeatureEnabled('new_checkout')) {`). Code reads a key/property that is missing from the input…
+Code  shop-api/app/Services/CheckoutV2.php:24
+     22          if ($flags->isFeatureEnabled('new_checkout')) {
+     23              $rates = $this->fx->latest();
+  ›  24              $rate  = $rates[$cart['currency']];
+Last changed by  22256cb Checkout v2: charge in the shopper's currency (behind new_checkout flag)  2026-11-02
+Fix
+  1. Turn off the flag 'new_checkout' in Production now (kill switch): tracebase why E-6 --rollback, …
+
+$ tracebase why E-6 --rollback
+Turn off the flag 'new_checkout' in Production through Flagsmith? [y/N] y
+✓ 'new_checkout' turned off in Production
+  watching E-6 for 5 minutes: if it stops, it is marked resolved by the rollback
+```
+
+The code above shipped "dark" weeks earlier, so the commit is not blamed: the flag flip is what turned it on.
+
+**Try it with self-hosted Flagsmith** (both run in Docker, on one private network):
+
+```bash
+python3 demo/seed.py --reset
+docker compose -f docker-compose.yml -f docker-compose.flagsmith.yml up -d --build
+python3 demo/flags_demo.py setup     # Flagsmith user, project, the new_checkout flag, the webhook, an API key
+#   put the two printed values in .env, then:
+docker compose -f docker-compose.yml -f docker-compose.flagsmith.yml up -d tracebase
+python3 demo/flags_demo.py traffic   # the demo shop: checkouts every 2 s, reading new_checkout from Flagsmith
+python3 demo/flags_demo.py on        # or flip it in the Flagsmith dashboard (http://localhost:8000)
+tracebase errors && tracebase why E-<n> --rollback
+```
+
+**Connect your own Flagsmith.** In Flagsmith, add an environment webhook to
+`https://<tracebase>/api/flags/webhook` with a secret, and set the same secret as `TRACEBASE_FLAGSMITH_WEBHOOK_SECRET`
+(in team mode the webhook is refused without one). For the kill switch, create an organisation API key and set
+`TRACEBASE_FLAGSMITH_URL` and `TRACEBASE_FLAGSMITH_API_KEY`. Without them, flags are still shown as suspects; only
+turning them off from Tracebase is disabled. A self-hosted Flagsmith needs Tracebase's host in its
+`SSRF_ALLOWED_HOSTS` when both are on a private network (the compose file does this).
+
+The Flagsmith integration was built during the Flagsmith hackathon (November 2026) and is licensed under
+**Apache-2.0** ([backend/tracebase/flags/LICENSE](backend/tracebase/flags/LICENSE)).
+
 ## Phase 3: Log Detective
 
 Your production logs, read on your own machine. Thousands of identical errors become one group (`E-5`), and
@@ -366,6 +427,9 @@ firewall, team mode and a repo-sync cron; `--public-demo` adds a separate, isola
 | `TRACEBASE_CORS_ORIGINS` | *(empty)* | other sites allowed to call the API (comma-separated) |
 | `TRACEBASE_DOCKER_LOGS` | `0` | `1`: also read `docker logs` of running containers |
 | `TRACEBASE_ALERT_WEBHOOK` | *(empty)* | optional: push alerts to your own ntfy / Slack webhook |
+| `TRACEBASE_FLAGSMITH_URL` · `TRACEBASE_FLAGSMITH_API_KEY` | *(empty)* | Flagsmith API (e.g. `http://flagsmith:8000`) and an organisation API key: turn a suspect flag off after you approve it |
+| `TRACEBASE_FLAGSMITH_WEBHOOK_SECRET` | *(empty)* | secret of the Flagsmith webhook (checks `X-Flagsmith-Signature`); required in team mode |
+| `TRACEBASE_FLAG_VERIFY_MINUTES` | `5` | minutes to watch an error after a flag rollback before calling it resolved |
 | `TRACEBASE_SCHEDULER` | `1` | `0`: no background re-index, log collection or retention (tests, one-off runs) |
 | `TRACEBASE_FRONTEND_DIST` | `../frontend/dist` | built UI to serve (`/app/ui` in the image) |
 | `TRACEBASE_RUN_AS_ROOT` | `0` | Docker only: `1` keeps the container running as root instead of the `tracebase` user |
@@ -386,6 +450,8 @@ firewall, team mode and a repo-sync cron; `--public-demo` adds a separate, isola
 | `POST /api/reuse/bundle` `{repo, paths, project?, symbol?, renames?}` | a file + everything it needs, adapted to the project |
 | `GET /api/logs/groups?since=&service=&status=&q=` | error groups (`since`: "last night", "2h", "7d"…) |
 | `GET /api/logs/groups/E-5` · `POST …/explain` · `POST …/status` `{status}` | one group · its explanation · resolve / known / ignore |
+| `GET /api/logs/groups/E-5/flags` · `POST …/rollback` `{change_id, confirm}` | flag suspects and rollbacks · turn the flag off (admin) |
+| `POST /api/flags/webhook` · `GET /api/flags/changes?feature=&since=` · `GET /api/flags/where?feature=` | Flagsmith webhook (signed) · flag history · where the code checks a flag |
 | `POST /api/logs/ingest?service=` | send logs: raw text, `{"lines": […]}` or `{"events": […]}` |
 | `POST /api/logs/collect` | read log files and Docker logs now (admin) |
 | `GET /api/logs/services`, `/api/logs/timeline`, `/api/logs/events`, `/api/logs/stats` | |
@@ -439,3 +505,5 @@ demo/seed.py         demo repos (Laravel, Node, Python, Go/Gin, Java/Spring, Rai
 [Functional Source License 1.1, Apache 2.0 future license (FSL-1.1-ALv2)](LICENSE.md). You may use, run, self-host
 and modify Tracebase for any purpose except offering a product or service that competes with it. Each release
 becomes Apache 2.0 (fully open source) two years after it is published.
+
+The feature flag integration (`backend/tracebase/flags/`, its tests and `demo/flags_demo.py`) is Apache-2.0 now.

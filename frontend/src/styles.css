@@ -276,3 +276,17 @@ pre.sample { padding: 10px 14px; white-space: pre-wrap; word-break: break-word; 
 .frame .ln { display: inline-block; width: 40px; color: var(--muted); user-select: none; }
 .link-btn { background: none !important; border: 0 !important; padding: 0 !important; color: var(--brand); font-weight: 600; cursor: pointer; font-size: 13px; }
 @media (max-width: 900px) { .why-grid { grid-template-columns: 1fr; } .err-row { flex-wrap: wrap; } }
+
+/* feature flags (Flagsmith) */
+.tl-flag { stroke: var(--t3); stroke-width: 2.5px; stroke-dasharray: 4 2; }
+.tl-flag.off { stroke: var(--t1); }
+.tl-legend { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+.tl-key { display: inline-block; width: 3px; height: 12px; background: var(--t3); border-radius: 1px; }
+.flagbox { border-left: 3px solid var(--t3); }
+.flag-suspect { padding: 4px 0 10px; }
+.flag-suspect + .flag-suspect { border-top: 1px solid var(--border); padding-top: 10px; }
+.flag-suspect p { margin: 0 0 4px; }
+code.flag { color: var(--t3); font-weight: 700; }
+.btn.danger { background: var(--t4); border-color: var(--t4); }
+.rb-worked { color: var(--t1); font-weight: 600; }
+.rb-did_not_help, .rb-failed { color: var(--t3); }

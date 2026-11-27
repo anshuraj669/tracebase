@@ -10,6 +10,7 @@ from .. import team
 from ..code import git
 from ..code.search import read_code, resolve_path
 from ..db import rows, tx
+from ..flags import suspects as flag_suspects
 from ..llm import LLMUnavailable, llm
 from ..timeutil import iso, parse_ts
 from .grouper import get_group, rate_stats
@@ -116,7 +117,8 @@ def nearby_events(g: dict, minutes: int = 5) -> list[dict]:
     return out[:8]
 
 
-def _heuristic(g: dict, code: list[dict], stats: dict, events: list[dict] | None = None, commit: dict | None = None) -> dict:
+def _heuristic(g: dict, code: list[dict], stats: dict, events: list[dict] | None = None, commit: dict | None = None,
+               flags: list[dict] | None = None) -> dict:
     text = f"{g['title']}\n{g.get('sample') or ''}\n{g.get('stack') or ''}"
     cause, fixes = "Not enough information for a confident diagnosis — inspect the sample lines and stack trace.", []
     for pat, c, f in RULES:
@@ -148,6 +150,15 @@ def _heuristic(g: dict, code: list[dict], stats: dict, events: list[dict] | None
                   f" ({commit['author']}, {commit['date']}), {_ago(commit['minutes_before_first_error'])} before the first"
                   " error: the likely culprit.")
         fixes.append(f"Review what commit {commit['sha']} changed in {commit['repo']} (git show {commit['sha']}).")
+    top = (flags or [None])[0]
+    if top:
+        # a flag change tied to the failing code is the most direct explanation: it leads the cause
+        flag_text = flag_suspects.sentence(top)
+        cause = (flag_text + " " + cause) if top["link"] in ("guards", "call_path") else (cause + " " + flag_text)
+        ch = top["change"]
+        if top["can_roll_back"]:
+            fixes.insert(0, f"Turn off the flag '{ch['feature']}' in {ch['environment']} now (kill switch): "
+                            f"tracebase why {g['code']} --rollback, or the button in Log Detective.")
     dur = _duration(g)
     impact = (f"1 occurrence at {g['first_seen'][:16].replace('T', ' ')}." if g["count"] == 1 else
               f"{g['count']} occurrences between {g['first_seen'][11:16]} and {g['last_seen'][11:16]}{dur}.")
@@ -191,6 +202,10 @@ def _duration(g: dict) -> str:
     return ""
 
 
+# Bump when explanations change shape or logic: older cached explanations are then recomputed, not served.
+EXPLAIN_VERSION = 2
+
+
 def explain_group(gid: int, refresh: bool = False) -> dict:
     g = get_group(gid)
     if not g:
@@ -200,15 +215,17 @@ def explain_group(gid: int, refresh: bool = False) -> dict:
     if g.get("explanation") and not refresh and shared:
         try:
             cached = json.loads(g["explanation"])
-            cached["cached"] = True
-            return cached
+            if cached.get("v") == EXPLAIN_VERSION:
+                cached["cached"] = True
+                return cached
         except json.JSONDecodeError:
             pass
     code = code_context(g["frames"], g["service"])
     stats = rate_stats(g["service"], parse_ts(g["last_seen"]))
     events = nearby_events(g)
     commit = introduced_by(code, g["first_seen"])
-    result = _heuristic(g, code, stats, events, commit)
+    flags = flag_suspects.for_group(g, code)
+    result = _heuristic(g, code, stats, events, commit, flags)
     if llm.available():
         ctx = {
             "group": {k: g[k] for k in ("code", "service", "level", "title", "count", "first_seen", "last_seen", "status")},
@@ -219,6 +236,10 @@ def explain_group(gid: int, refresh: bool = False) -> dict:
                                for c in code],
             "events_in_other_services_near_first_error": events,
             "commit_that_last_changed_the_failing_line": commit,
+            "feature_flag_changes_near_first_error": [
+                {"flag": f["change"]["feature"], "change": f["change"]["summary"], "environment": f["change"]["environment"],
+                 "segment": f["change"].get("segment"), "minutes_before_first_error": f["minutes_before_first_error"],
+                 "tie_to_failing_code": f["link_reason"], "flag_check": f["flag_check"]} for f in flags],
             "error_rate": stats,
             "rule_based_hint": result["cause"],
         }
@@ -226,7 +247,8 @@ def explain_group(gid: int, refresh: bool = False) -> dict:
             "Explain this production error group for a developer. Reply ONLY with JSON: "
             '{"cause": "...", "impact": "...", "fix": ["step 1", "step 2"]}. Be specific. Only cite file:line '
             "locations that appear in code_at_frames — never invent paths. Use events in other services "
-            "to explain WHY it happened when they line up in time. Keep each field under 60 words.\n\n"
+            "to explain WHY it happened when they line up in time. A feature flag change tied to the failing code is a "
+            "likely cause: name the flag and say turning it off is the fastest mitigation. Keep each field under 60 words.\n\n"
             + json.dumps(ctx, default=str)[:9000]
         )
         try:
@@ -240,18 +262,21 @@ def explain_group(gid: int, refresh: bool = False) -> dict:
                 fix = data.get("fix")
                 llm_fix = [str(f) for f in fix] if isinstance(fix, list) else [str(fix)] if fix else []
                 # Concrete rule-derived fixes (exact line change, live-dump advice) always come first.
-                concrete = [f for f in result["fix"] if f.startswith(("In ", "Use a live dump"))]
+                concrete = [f for f in result["fix"] if f.startswith(("Turn off the flag", "In ", "Use a live dump"))]
                 cause = str(data["cause"])
                 if "backup" in result["cause"] and "backup" not in cause.lower():
                     cause += " " + result["cause"][result["cause"].find("At "):] if "At " in result["cause"] else ""
                 if commit and commit["sha"] in result["cause"] and commit["sha"] not in cause:
                     i = result["cause"].find(f"{commit['path']}:{commit['line']} was last changed")
                     cause += (" " + result["cause"][i:]) if i >= 0 else ""
+                if flags and flags[0]["change"]["feature"] not in cause:
+                    cause = flag_suspects.sentence(flags[0]) + " " + cause
                 result = {"cause": cause.strip(), "impact": result["impact"],  # numbers come from the data, never the LLM
                           "fix": (concrete + [f for f in llm_fix if f not in concrete])[:4] or result["fix"], "source": "llm"}
         except (LLMUnavailable, json.JSONDecodeError, ValueError):
             pass
-    result.update({"group": g["code"], "code": code, "events": events, "stats": stats, "commit": commit})
+    result.update({"group": g["code"], "code": code, "events": events, "stats": stats, "commit": commit, "flags": flags,
+                   "v": EXPLAIN_VERSION})
     if shared:
         with tx() as c:
             c.execute("UPDATE error_groups SET explanation=? WHERE id=?", (json.dumps(result, default=str), gid))

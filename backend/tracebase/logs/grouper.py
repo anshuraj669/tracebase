@@ -97,7 +97,7 @@ def ingest_events(events: list[Event], source: str = "") -> dict:
                     else:
                         gid = g["id"]
                         if g["status"] == "resolved":
-                            c.execute("UPDATE error_groups SET status='regressed' WHERE id=?", (gid,))
+                            c.execute("UPDATE error_groups SET status='regressed', explanation=NULL WHERE id=?", (gid,))
                             regressed.append(gid)
                     cache[fp] = gid
                 group_id = gid

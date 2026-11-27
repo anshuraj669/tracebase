@@ -18,6 +18,7 @@ export default function LogsPage({ onOpen, stats, selected }) {
   const [groups, setGroups] = useState(null)
   const [services, setServices] = useState([])
   const [timeline, setTimeline] = useState([])
+  const [flagChanges, setFlagChanges] = useState([])
   const [alerts, setAlerts] = useState([])
   const [err, setErr] = useState(null)
   const [tick, setTick] = useState(0)
@@ -31,6 +32,7 @@ export default function LogsPage({ onOpen, stats, selected }) {
     setErr(null)
     api.errors({ since, service, q }).then(setGroups).catch((e) => setErr(e.message))
     api.logTimeline(service).then(setTimeline).catch(() => setTimeline([]))
+    api.flagChanges('31d').then(setFlagChanges).catch(() => setFlagChanges([]))
   }, [since, service, q, tick])
 
   const open = (code) => { location.hash = code ? `logs/${code}` : 'logs' }
@@ -55,7 +57,7 @@ export default function LogsPage({ onOpen, stats, selected }) {
               <h3>Errors per 10 minutes {service && <span className="muted small">· {service}</span>}</h3>
               <span className="muted small">last 48h of logs</span>
             </div>
-            <Timeline rows={timeline} />
+            <Timeline rows={timeline} flags={flagChanges} />
           </div>
 
           <div className="log-filters">
@@ -106,10 +108,13 @@ function Kpi({ icon, tone, n, label, bad }) {
   )
 }
 
-function Timeline({ rows }) {
+function Timeline({ rows, flags = [] }) {
   const max = Math.max(1, ...rows.map((r) => r.errors || 0))
   if (!rows.length) return <p className="muted small">No log lines yet. Drop log files into the logs folder, or send some below.</p>
   const w = 100 / rows.length
+  // feature flag changes, placed on their 10-minute bucket
+  const at = Object.fromEntries(rows.map((r, i) => [r.bucket, i]))
+  const marks = flags.map((f) => ({ f, i: at[f.ts.slice(0, 15) + '0'] })).filter((m) => m.i !== undefined)
   return (
     <div className="tl">
       <svg viewBox="0 0 100 40" preserveAspectRatio="none" role="img" aria-label="Errors over time">
@@ -117,7 +122,17 @@ function Timeline({ rows }) {
           const h = ((r.errors || 0) / max) * 38
           return <rect key={r.bucket} x={i * w} y={40 - h} width={Math.max(w * 0.8, 0.15)} height={h} className="tl-bar"><title>{`${r.bucket.replace('T', ' ')}: ${r.errors} errors`}</title></rect>
         })}
+        {marks.map(({ f, i }) => {
+          // a thin line (constant on-screen width) at the change's minute inside its 10-minute bucket
+          const x = i * w + ((Number(f.ts.slice(15, 16)) + Number(f.ts.slice(17, 19)) / 60) / 10) * w * 0.8
+          return (
+            <line key={f.id} x1={x} x2={x} y1={0} y2={40} vectorEffect="non-scaling-stroke" className={`tl-flag ${f.enabled_after === false ? 'off' : ''}`}>
+              <title>{`${f.ts.replace('T', ' ')}: flag ${f.feature} ${f.summary}${f.environment ? ` in ${f.environment}` : ''}${f.changed_by ? ` by ${f.changed_by}` : ''}`}</title>
+            </line>
+          )
+        })}
       </svg>
+      {marks.length > 0 && <div className="muted small tl-legend"><i className="tl-key" /> feature flag change (hover for details)</div>}
       <div className="tl-axis muted small"><span>{when(rows[0].bucket)}</span><span>peak {max}/10 min</span><span>{when(rows[rows.length - 1].bucket)}</span></div>
     </div>
   )
@@ -174,6 +189,7 @@ function ErrorDetail({ code, onBack, onOpen, onChange }) {
             <p className="muted small">Explained {x.source === 'llm' ? 'by your local LLM' : 'by built-in rules'} from your logs, code and git history, on this machine.</p>
           </div>
           <div className="why-side">
+            <FlagSuspects code={code} explained={x} onChange={() => { api.logGroup(code).then(setG); onChange() }} />
             {x.commit && (
               <div className="card panel commit">
                 <h4>Last changed by</h4>
@@ -216,6 +232,64 @@ function ErrorDetail({ code, onBack, onOpen, onChange }) {
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+function FlagSuspects({ code, explained, onChange }) {
+  const [info, setInfo] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState(null)
+  const load = () => api.errorFlags(code).then(setInfo).catch(() => setInfo(null))
+  useEffect(() => { load() }, [code, explained])
+  useEffect(() => { // while a rollback is being watched, check back for the verdict
+    if (!info?.rollbacks?.some((r) => r.status === 'watching')) return
+    const t = setInterval(() => { load(); onChange() }, 15000)
+    return () => clearInterval(t)
+  }, [info])
+  if (!info?.suspects?.length) return null
+  const turnOff = async (s) => {
+    const ch = s.change
+    const where = ch.environment + (ch.segment ? ` (segment ${ch.segment})` : '')
+    if (!window.confirm(`Turn off the feature flag "${ch.feature}" in ${where} through Flagsmith?\n\nTracebase then watches ${code}: if it stops, it is marked resolved.`)) return
+    setBusy(true)
+    setMsg(null)
+    try {
+      await api.rollbackFlag(code, ch.id)  // the rollback's own status line confirms it below
+      load()
+      onChange()
+    } catch (e) {
+      setMsg(e.message)
+    }
+    setBusy(false)
+  }
+  const watching = (id) => info.rollbacks?.find((r) => r.change_id === id)
+  return (
+    <div className="card panel flagbox">
+      <h4>Feature flag changed before it started</h4>
+      {info.suspects.map((s) => {
+        const ch = s.change
+        const rb = watching(ch.id)
+        const m = s.minutes_before_first_error
+        return (
+          <div key={ch.id} className="flag-suspect">
+            <p><code className="flag">{ch.feature}</code> {ch.summary} in <b>{ch.environment}</b>{ch.segment && <> (segment {ch.segment})</>}</p>
+            <p className="muted small">{ch.changed_by && <>{ch.changed_by} · </>}{ch.ts.replace('T', ' ')}
+              <b className="bad"> · {m >= 0 ? `${m} min before the errors started` : `${-m} min after the errors started`}</b></p>
+            {s.link && s.flag_check && <p className="small">{s.link_reason}: <code>{s.flag_check.path}:{s.flag_check.line}</code> <span className="muted mono">{s.flag_check.text.slice(0, 70)}</span></p>}
+            {rb ? <p className={`small rb rb-${rb.status}`}>{{
+              watching: `Turned off ${rb.created_at.replace('T', ' ').slice(11, 16)} by ${!rb.approved_by || rb.approved_by === 'local' ? 'you' : rb.approved_by}. Watching for new errors…`,
+              worked: `Turned off, and the error stopped: resolved by the rollback (${rb.errors_before} errors in the minutes before, 0 after).`,
+              did_not_help: `Turned off, but ${rb.errors_after} errors came after: the flag was not the (only) cause.`,
+              failed: `Could not turn it off: ${rb.note}`,
+            }[rb.status]}</p>
+              : s.can_roll_back && (info.can_change_flags
+                ? <button className="primary btn danger" disabled={busy} onClick={() => turnOff(s)}>Turn off “{ch.feature}”</button>
+                : <p className="muted small">Connect the Flagsmith API (TRACEBASE_FLAGSMITH_URL and _API_KEY) to turn it off from here.</p>)}
+          </div>
+        )
+      })}
+      {msg && <p className="small">{msg}</p>}
     </div>
   )
 }

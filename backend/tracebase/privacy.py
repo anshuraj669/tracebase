@@ -24,7 +24,7 @@ from .timeutil import iso, now
 
 log = logging.getLogger(__name__)
 
-TABLES = ("repos", "files", "chunks", "secrets", "log_events", "error_groups", "alerts", "users", "audit")
+TABLES = ("repos", "files", "chunks", "secrets", "log_events", "error_groups", "alerts", "flag_changes", "users", "audit")
 
 
 # ------------------------------------------------------------------ exclusions (forgotten repos / services)
@@ -55,7 +55,7 @@ def is_excluded_repo(name: str, excluded: list[str] | None = None) -> bool:
 # ------------------------------------------------------------------ retention
 def prune() -> dict:
     """Delete records older than their retention period. Returns how many rows were deleted per kind."""
-    out = {"log_events": 0, "error_groups": 0, "alerts": 0, "audit": 0, "log_offsets": 0}
+    out = {"log_events": 0, "error_groups": 0, "alerts": 0, "audit": 0, "log_offsets": 0, "flag_changes": 0}
     t = now()
     with tx() as c:
         if settings.log_retention_days > 0:
@@ -66,6 +66,10 @@ def prune() -> dict:
                 "DELETE FROM error_groups WHERE last_seen < ? AND NOT EXISTS"
                 " (SELECT 1 FROM log_events e WHERE e.group_id = error_groups.id)",
                 (iso(t - timedelta(days=settings.error_retention_days)),)).rowcount
+        if settings.error_retention_days > 0:  # flag changes explain errors: kept as long as errors are
+            cut = iso(t - timedelta(days=settings.error_retention_days))
+            out["flag_changes"] = c.execute("DELETE FROM flag_changes WHERE ts < ?", (cut,)).rowcount
+            c.execute("DELETE FROM flag_rollbacks WHERE created_at < ?", (cut,))
         # alerts.created_at and audit.at are SQLite CURRENT_TIMESTAMP values (UTC, "YYYY-MM-DD HH:MM:SS")
         if settings.alert_retention_days > 0:
             out["alerts"] = c.execute("DELETE FROM alerts WHERE created_at < datetime('now', ?)",
@@ -191,7 +195,7 @@ def wipe(keep_team: bool = True) -> dict:
     from .embeddings import vector_index
 
     tables = ["chunks_fts", "chunks", "files", "repos", "secrets", "log_events", "error_groups", "log_offsets",
-              "alerts", "kv"]
+              "alerts", "flag_changes", "flag_rollbacks", "kv"]
     if not keep_team:
         tables += ["users", "audit"]
     keep_kv = {k: kv_get(k) for k in ("excluded_repos", "excluded_services", "redaction_version")}

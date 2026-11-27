@@ -61,6 +61,16 @@ class Settings:
     enable_scheduler: bool = field(default_factory=lambda: _env("SCHEDULER", "1") == "1")
     frontend_dist: Path = field(default_factory=lambda: Path(_env("FRONTEND_DIST", "../frontend/dist")))
 
+    # Flagsmith (self-hosted or SaaS): flag changes become suspects in Log Detective, and a flag can be turned off
+    # from Tracebase after you approve it. URL of the Flagsmith API, e.g. http://flagsmith:8000 (no /api/v1).
+    flagsmith_url: str = field(default_factory=lambda: _env("FLAGSMITH_URL", "").rstrip("/"))
+    # Organisation API key (Organisation settings > API Keys): read the audit log, change flags on approval
+    flagsmith_api_key: str = field(default_factory=lambda: _env("FLAGSMITH_API_KEY", ""))
+    # Secret of the Flagsmith webhook that points at /api/flags/webhook (checked against X-Flagsmith-Signature)
+    flagsmith_webhook_secret: str = field(default_factory=lambda: _env("FLAGSMITH_WEBHOOK_SECRET", ""))
+    # Minutes to watch an error after a flag rollback: if it stops, the error is marked resolved by the rollback
+    flag_verify_minutes: int = field(default_factory=lambda: int(_env("FLAG_VERIFY_MINUTES", "5")))
+
     # Team mode: set an admin token to require a token on every API call and enable members + audit log
     admin_token: str = field(default_factory=lambda: _env("ADMIN_TOKEN", ""))
 

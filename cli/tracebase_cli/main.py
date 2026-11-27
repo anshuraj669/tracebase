@@ -11,6 +11,8 @@
 
   tracebase errors --since "last night"          production errors, grouped (Log Detective)
   tracebase why E-5                              why it happened: cause, the failing code, the commit, the fix
+  tracebase why E-5 --rollback                   turn off the feature flag that caused it (asks first, Flagsmith)
+  tracebase flags                                feature flag changes (Flagsmith), newest first
   docker logs app 2>&1 | tracebase ingest - --service app      send logs from anywhere
   tracebase data                                 what is stored; export / purge / forget (admin)
 
@@ -352,6 +354,16 @@ def cmd_why(args: argparse.Namespace, api: Client) -> int:
             mark = ui.red("›") if ln["n"] == c["line"] else " "
             text = ui.red(ln["text"]) if ln["n"] == c["line"] else ln["text"]
             print(f"  {mark}{ui.dim(str(ln['n']).rjust(4))}  {text}")
+    for s in (r.get("flags") or [])[:2]:
+        ch = s["change"]
+        m = s["minutes_before_first_error"]
+        lag = f"{m} min before the errors started" if m >= 0 else f"{-m} min after the errors started"
+        print(f"\n{ui.bold('Feature flag')}  {ui.yellow(ch['feature'])} {ch['summary']} in {ch.get('environment') or '?'}"
+              + (f" (segment {ch['segment']})" if ch.get("segment") else "")
+              + f"  {ui.dim((ch.get('changed_by') or '') + ', ' + ch['ts'].replace('T', ' ') + ', ' + lag)}")
+        fc = s.get("flag_check")
+        if s.get("link") and fc:
+            print(f"  {ui.dim(s['link_reason'] + ':')} {ui.teal(fc['repo'])}/{fc['path']}:{fc['line']}  {fc['text'][:80]}")
     cm = r.get("commit")
     if cm:
         when = cm.get("minutes_before_first_error")
@@ -363,6 +375,63 @@ def cmd_why(args: argparse.Namespace, api: Client) -> int:
             print(f"  {i}. {f}")
     src = "rules + your code and git history" if r.get("source") == "rules" else f"local LLM ({r.get('source')})"
     print(ui.dim(f"\n  explained by {src} · mark it: tracebase resolve {gid} [--as known|ignored]"))
+    top = next((s for s in r.get("flags") or [] if s.get("can_roll_back")), None)
+    if args.rollback:
+        return _rollback(api, gid, top, args.yes)
+    if top:
+        print(ui.dim(f"  turn off '{top['change']['feature']}' (asks first): tracebase why {gid} --rollback"))
+    return 0
+
+
+def _rollback(api: Client, gid: str, suspect: dict | None, yes: bool) -> int:
+    """Turn off the suspect flag in Flagsmith, only after the person says yes."""
+    if not suspect:
+        ui.error(f"no feature flag that was turned on before {gid} to turn off")
+        return 1
+    ch = suspect["change"]
+    where = ch.get("environment") or "?"
+    if ch.get("segment"):
+        where += f" (segment {ch['segment']})"
+    q = f"\nTurn off the flag '{ch['feature']}' in {where} through Flagsmith?"
+    if not yes and not sys.stdin.isatty():
+        ui.error("refusing to change a flag without confirmation: pass --yes")
+        return 1
+    if not yes and input(f"{q} [y/N] ").strip().lower() not in ("y", "yes"):
+        print(ui.dim("nothing changed"))
+        return 0
+    res = api.rollback_flag(gid, ch["id"])
+    if res.get("already"):
+        print(f"{ui.green('✓')} already turned off by Tracebase; watching {gid}")
+        return 0
+    rb = res["rollback"]
+    print(f"{ui.green('✓')} '{ch['feature']}' turned off in {where}"
+          + (ui.dim(f"  ({rb['note']})") if rb.get("note") else ""))
+    print(ui.dim(f"  watching {gid} for {res.get('watch_minutes', 5)} minutes: if it stops, it is marked resolved by the "
+                 "rollback (tracebase alerts)"))
+    return 0
+
+
+def cmd_flags(args: argparse.Namespace, api: Client) -> int:
+    if args.where:
+        refs = api.flag_where(args.where)
+        if not refs:
+            print(ui.dim(f"no code checks '{args.where}' (its name in quotes) in your repos"))
+            return 0
+        ui.header(f"Where the code checks '{args.where}'")
+        for r in refs:
+            print(f"  {ui.teal(r['repo'])}/{r['path']}:{r['line']}  {ui.dim(r.get('symbol') or '')}  {r['text'][:90]}")
+        return 0
+    changes = api.flag_changes(args.feature, args.env, None if args.all else args.since, args.limit)
+    if not changes:
+        print(ui.dim("no flag changes" + ("" if args.all else f" since {args.since}")
+                     + ". Connect Flagsmith: a webhook to /api/flags/webhook (see README)"))
+        return 0
+    ui.header("Feature flag changes" + ("" if args.all else f" since {args.since}"))
+    for c in changes:
+        src = ui.dim(" (Tracebase rollback)") if c.get("source") == "tracebase" else ""
+        print(f"  {ui.dim(c['ts'].replace('T', ' ')[5:16])}  {ui.yellow(c['feature'][:22].ljust(22))} "
+              f"{(c.get('environment') or '')[:12].ljust(12)} {c['summary'][:60]}"
+              + (f" [{c['segment']}]" if c.get("segment") else "") + f"  {ui.dim(c.get('changed_by') or '')}{src}")
     return 0
 
 
@@ -651,7 +720,18 @@ def main(argv: list[str] | None = None) -> int:
     wy = sub.add_parser("why", help="explain an error: cause, failing code, the commit, fix")
     wy.add_argument("id", help="E-5 or 5")
     wy.add_argument("--refresh", action="store_true", help="investigate again instead of the saved explanation")
+    wy.add_argument("--rollback", action="store_true",
+                    help="turn off the feature flag that was turned on just before it (Flagsmith; asks first)")
+    wy.add_argument("--yes", action="store_true", help="with --rollback: don't ask")
     wy.set_defaults(fn=cmd_why)
+    fl = sub.add_parser("flags", help="feature flag changes (Flagsmith), or where the code checks a flag")
+    fl.add_argument("--since", default="7d")
+    fl.add_argument("--all", action="store_true", help="any time")
+    fl.add_argument("--feature")
+    fl.add_argument("--env", help="environment name, e.g. Production")
+    fl.add_argument("--where", metavar="FLAG", help="show where your code checks this flag")
+    fl.add_argument("--limit", type=int, default=30)
+    fl.set_defaults(fn=cmd_flags)
     rs = sub.add_parser("resolve", help="mark an error resolved (or known / ignored)")
     rs.add_argument("id")
     rs.add_argument("--as", dest="status", default="resolved", choices=["resolved", "known", "ignored", "new"])

@@ -1,0 +1,80 @@
+# Tracebase + self-hosted Flagsmith, side by side.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.flagsmith.yml up -d --build
+#   python3 demo/flags_demo.py setup      # creates the Flagsmith project, the new_checkout flag, the webhook, an API key
+#
+# Flagsmith: http://localhost:8000 (dashboard + API). Tracebase: http://localhost:8080.
+# Flagsmith sends every flag change to Tracebase (signed webhook), and Tracebase can turn a flag off through the
+# Flagsmith API once you approve it. Both talk over the internal Docker network; nothing leaves the machine.
+#
+# The Flagsmith part follows Flagsmith's own docker-compose.yml (https://docs.flagsmith.com/deployment/docker).
+
+x-flagsmith-env: &flagsmith-env
+  DATABASE_URL: postgresql://postgres:${FLAGSMITH_DB_PASSWORD:-flagsmith}@flagsmith-db:5432/flagsmith
+  USE_POSTGRES_FOR_ANALYTICS: 'true'
+  ENVIRONMENT: production
+  DJANGO_ALLOWED_HOSTS: '*'
+  FLAGSMITH_DOMAIN: ${FLAGSMITH_DOMAIN:-localhost:8000}
+  DJANGO_SECRET_KEY: ${FLAGSMITH_SECRET_KEY:-change-me-flagsmith-secret}
+  TASK_RUN_METHOD: TASK_PROCESSOR
+  # Flagsmith refuses webhooks to private addresses (SSRF protection); Tracebase is on this private network
+  SSRF_ALLOWED_HOSTS: ${FLAGSMITH_SSRF_ALLOWED_HOSTS:-tracebase.internal,host.docker.internal}
+  ALLOW_REGISTRATION_WITHOUT_INVITE: 'true'
+
+services:
+  tracebase:
+    networks:
+      default:
+        aliases: [tracebase.internal]   # Flagsmith only accepts webhook URLs with a dotted host name
+    environment:
+      TRACEBASE_FLAGSMITH_URL: http://flagsmith:8000
+      TRACEBASE_FLAGSMITH_API_KEY: ${FLAGSMITH_API_KEY:-}                 # printed by demo/flags_demo.py setup
+      TRACEBASE_FLAGSMITH_WEBHOOK_SECRET: ${FLAGSMITH_WEBHOOK_SECRET:-}   # the same secret as on the Flagsmith webhook
+
+  flagsmith-db:
+    image: postgres:15.5-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${FLAGSMITH_DB_PASSWORD:-flagsmith}
+      POSTGRES_DB: flagsmith
+    volumes:
+      - flagsmith-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -d flagsmith -U postgres']
+      interval: 2s
+      timeout: 2s
+      retries: 20
+      start_period: 20s
+
+  flagsmith-migrate:
+    image: docker.flagsmith.com/flagsmith/flagsmith:${FLAGSMITH_VERSION:-2.295.2}
+    command: [migrate]
+    environment: *flagsmith-env
+    healthcheck:
+      disable: true
+    depends_on:
+      flagsmith-db:
+        condition: service_healthy
+
+  flagsmith:
+    image: docker.flagsmith.com/flagsmith/flagsmith:${FLAGSMITH_VERSION:-2.295.2}
+    restart: unless-stopped
+    command: [serve]
+    environment: *flagsmith-env
+    ports: ["8000:8000"]
+    depends_on:
+      flagsmith-migrate:
+        condition: service_completed_successfully
+
+  flagsmith-task-processor:   # sends the webhooks (and retries them)
+    image: docker.flagsmith.com/flagsmith/flagsmith:${FLAGSMITH_VERSION:-2.295.2}
+    restart: unless-stopped
+    command: [run-task-processor]
+    environment: *flagsmith-env
+    extra_hosts: ["host.docker.internal:host-gateway"]   # only for a Tracebase run outside Docker (make dev)
+    depends_on:
+      flagsmith-migrate:
+        condition: service_completed_successfully
+
+volumes:
+  flagsmith-pgdata:

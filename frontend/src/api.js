@@ -41,6 +41,10 @@ export const api = {
   setErrorStatus: (code, status) => req('POST', `/api/logs/groups/${code}/status`, { status }),
   logServices: () => req('GET', '/api/logs/services'),
   logTimeline: (service) => req('GET', `/api/logs/timeline?${qs({ service, hours: 48 })}`),
+  // Feature flags (Flagsmith)
+  errorFlags: (code) => req('GET', `/api/logs/groups/${code}/flags`),
+  rollbackFlag: (code, changeId) => req('POST', `/api/logs/groups/${code}/rollback`, { change_id: changeId, confirm: true }),
+  flagChanges: (since) => req('GET', `/api/flags/changes?${qs({ since, limit: 200 })}`),
   alerts: (unread) => req('GET', `/api/alerts${unread ? '?unread=true' : ''}`),
   readAlerts: () => req('POST', '/api/alerts/read', {}),
   ingest: (text, service) => req('POST', `/api/logs/ingest?${qs({ service })}`, text, auth.get(), true),
