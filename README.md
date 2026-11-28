@@ -35,6 +35,27 @@ what is stored. The container runs as a non-root user and keeps `/data` private 
 
 ---
 
+## Connect your apps
+
+**Projects** (in the sidebar) connects an app in a minute. Each project gets a **write-only key** (`tbk_…`): it
+can send that project's logs and errors and nothing else, so it is safe in a browser bundle or an environment
+variable. The page shows the snippet for your stack and turns green when the first event arrives.
+
+| Your app | How |
+|---|---|
+| Browser (React, Vue, plain JS) | `<script src="https://<tracebase>/sdk/tracebase.js" data-key="tbk_…"></script>`: uncaught errors, failed promises and `console.error`, with stack traces |
+| Node.js 18+ | the same `tracebase.js`: `Tracebase.init({ url, key })`; crashes and unhandled rejections are sent |
+| Python | `pip install tracebase-cli`, then `logging.getLogger().addHandler(TracebaseHandler(url, key))` |
+| Log files | `TRACEBASE_TOKEN=tbk_… tracebase ingest app.log`, or curl, or drop them in the logs folder |
+| Anything else | `POST /api/logs/ingest` with `X-Tracebase-Key: tbk_…` and `{"events": [{level, message, stack}]}` |
+
+Errors are grouped in Log Detective and explained with your code and Git history when the repo is in the repos
+folder. `tracebase project add|list|rotate|test|remove` does the same from the terminal. Each project may send
+up to 6000 events a minute.
+
+**Sign-in:** on a team server people can **Continue with Google** (invited emails only) or use a token. See
+[deploy/README.md](deploy/README.md#continue-with-google).
+
 ## Feature flags: Flagsmith in Log Detective
 
 Bad releases are often a flag flip, not a deploy. Tracebase reads every flag change from

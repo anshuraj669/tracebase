@@ -92,8 +92,27 @@ class Client:
     def members(self) -> list[dict]:
         return self._req("GET", "/api/team/users")
 
-    def add_member(self, name: str, repos: list[str], role: str = "member") -> dict:
-        return self._req("POST", "/api/team/users", json={"name": name, "repos": repos, "role": role})
+    def add_member(self, name: str, repos: list[str], role: str = "member", email: str | None = None) -> dict:
+        return self._req("POST", "/api/team/users", json={"name": name, "repos": repos, "role": role, "email": email})
+
+    def set_member_email(self, name: str, email: str | None) -> dict:
+        return self._req("PUT", f"/api/team/users/{name}/email", json={"email": email})
+
+    # connected projects
+    def projects(self) -> list[dict]:
+        return self._req("GET", "/api/projects")
+
+    def add_project(self, name: str, platform: str) -> dict:
+        return self._req("POST", "/api/projects", json={"name": name, "platform": platform})
+
+    def rotate_project(self, name: str) -> dict:
+        return self._req("POST", f"/api/projects/{name}/rotate")
+
+    def remove_project(self, name: str, delete_data: bool = False) -> dict:
+        return self._req("DELETE", f"/api/projects/{name}", params={"delete_data": str(delete_data).lower()})
+
+    def test_project(self, name: str) -> dict:
+        return self._req("POST", f"/api/projects/{name}/test")
 
     def set_member_repos(self, name: str, repos: list[str]) -> dict:
         return self._req("PUT", f"/api/team/users/{name}/repos", json=repos)

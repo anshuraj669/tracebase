@@ -73,6 +73,11 @@ class Settings:
 
     # Team mode: set an admin token to require a token on every API call and enable members + audit log
     admin_token: str = field(default_factory=lambda: _env("ADMIN_TOKEN", ""))
+    # "Continue with Google": the OAuth client ID (Google Cloud console > APIs & Services > Credentials > OAuth
+    # client ID > Web application, with this site in "Authorized JavaScript origins"). Team mode only.
+    google_client_id: str = field(default_factory=lambda: _env("GOOGLE_CLIENT_ID", ""))
+    # these Google accounts become admins on their first sign-in; everyone else must be invited by email
+    admin_emails: str = field(default_factory=lambda: _env("ADMIN_EMAILS", ""))
 
     @property
     def db_path(self) -> Path:

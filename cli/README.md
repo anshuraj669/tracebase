@@ -54,7 +54,19 @@ tracebase copy "login logic"     find it and copy it into this project (shows th
 tracebase search "jwt refresh"   search across all your repos
 tracebase errors / why E-5       production errors, grouped and explained
 tracebase ingest app.log         send log files (or stdin: -)
-tracebase team add priya --repos "freelance/*"     team server admin
+tracebase team add priya --repos "freelance/*" --email priya@company.com   team server admin
+tracebase project add billing-api --platform python  connect an app: prints its write-only key
+```
+
+### Send a Python app's logs and errors
+
+```python
+import logging, os
+from tracebase_cli.handler import TracebaseHandler, capture_uncaught
+
+handler = TracebaseHandler(url="https://your-tracebase.example.com", key=os.environ["TRACEBASE_KEY"])
+logging.getLogger().addHandler(handler)   # WARNING and above, batched in a background thread
+capture_uncaught(handler)                 # crashes too
 ```
 
 `tracebase --help` lists everything.

@@ -499,7 +499,9 @@ def cmd_team(args: argparse.Namespace, api: Client) -> int:
     if args.action == "list":
         for m in api.members():
             seen = m.get("last_seen") or "never"
-            print(f"{ui.bold(m['name']):24} {m['role']:7} repos: {', '.join(m['repos']):40} {ui.dim('last seen ' + seen)}")
+            mail = f" <{m['email']}>" if m.get("email") else ""
+            print(f"{ui.bold(m['name']):24} {m['role']:7} repos: {', '.join(m['repos']):40} {ui.dim('last seen ' + seen)}"
+                  + ui.dim(mail))
         return 0
     if args.action == "audit":
         for e in reversed(api.audit(args.user, args.what, args.limit)):
@@ -512,10 +514,16 @@ def cmd_team(args: argparse.Namespace, api: Client) -> int:
         ui.error(f"tracebase team {args.action} needs a member name")
         return 2
     if args.action == "add":
-        res = api.add_member(args.name, args.repos or ["*"], "admin" if args.admin else "member")
+        res = api.add_member(args.name, args.repos or ["*"], "admin" if args.admin else "member", args.email)
         ui.info(f"{ui.green('✓')} Added {ui.bold(args.name)} with access to: {', '.join(args.repos or ['*'])}")
+        if args.email:
+            ui.info(f"They can open {api.url} and choose {ui.bold('Continue with Google')} as {args.email}.")
         ui.info(f"Token (shown once, send it privately): {ui.bold(res['token'])}")
         ui.info(ui.dim(f"They run:  tracebase login {res['token']} --url {api.url}"))
+    elif args.action == "email":
+        api.set_member_email(args.name, args.email or None)
+        ui.info(f"{ui.green('✓')} {args.name} " + (f"can sign in with Google as {args.email}" if args.email
+                                                    else "can no longer sign in with Google"))
     elif args.action == "repos":
         api.set_member_repos(args.name, args.repos or ["*"])
         ui.info(f"{ui.green('✓')} {args.name} now sees: {', '.join(args.repos or ['*'])}")
@@ -525,6 +533,41 @@ def cmd_team(args: argparse.Namespace, api: Client) -> int:
     elif args.action == "remove":
         api.remove_member(args.name)
         ui.info(f"{ui.green('✓')} Removed {args.name}; their token no longer works.")
+    return 0
+
+
+# ---------------------------------------------------------------- connected projects
+def cmd_project(args: argparse.Namespace, api: Client) -> int:
+    a = args.action
+    if a == "list":
+        items = api.projects()
+        if not items:
+            print(ui.dim("no connected projects yet: tracebase project add <name> --platform browser|node|python|logs"))
+        for p in items:
+            last = p.get("last_event_at") or "no events yet"
+            print(f"{ui.bold(p['name']):24} {p['platform']:8} {p['events']:>8} events  "
+                  f"{p['open_errors']} open errors  {ui.dim('last ' + last)}")
+        return 0
+    if not args.name:
+        ui.error(f"tracebase project {a} needs a project name")
+        return 2
+    if a == "add":
+        res = api.add_project(args.name, args.platform)
+        ui.info(f"{ui.green('✓')} Project {ui.bold(res['name'])} ({res['platform']}). Ingest key, shown once: {ui.bold(res['key'])}")
+        ui.info(ui.dim(f"Setup snippets: {api.url}/#projects/{res['name']}   Send a file now: "
+                       f"TRACEBASE_TOKEN={res['key']} tracebase ingest app.log"))
+    elif a == "rotate":
+        res = api.rotate_project(args.name)
+        ui.info(f"{ui.green('✓')} New key for {args.name} (the old one stopped working): {ui.bold(res['key'])}")
+    elif a == "test":
+        res = api.test_project(args.name)
+        ui.info(f"{ui.green('✓')} Test event sent to {args.name}" + (f": {', '.join(res['new_groups'])}" if res.get("new_groups") else ""))
+    elif a == "remove":
+        if args.delete_data and not _confirm(f"Delete {args.name} and all its logs and errors?", args.yes):
+            return 1
+        api.remove_project(args.name, args.delete_data)
+        ui.info(f"{ui.green('✓')} Removed {args.name}; its key no longer works"
+                + ("; its logs and errors were deleted." if args.delete_data else " (its logs are kept)."))
     return 0
 
 
@@ -704,14 +747,23 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("logout", help="forget the saved token").set_defaults(fn=cmd_logout)
 
     tm = sub.add_parser("team", help="team server admin: members, repo access, audit log")
-    tm.add_argument("action", choices=["list", "add", "repos", "rotate", "remove", "audit"])
+    tm.add_argument("action", choices=["list", "add", "email", "repos", "rotate", "remove", "audit"])
     tm.add_argument("name", nargs="?")
     tm.add_argument("--repos", nargs="+", metavar="PATTERN", help='repos they can see, e.g. "freelance/*" shop-api')
     tm.add_argument("--admin", action="store_true", help="make them an admin")
+    tm.add_argument("--email", help="their Google account, so they can sign in with Google")
     tm.add_argument("--user", help="audit: only this member")
     tm.add_argument("--what", help="audit: only this action (find, bundle, copied, ask…)")
     tm.add_argument("--limit", type=int, default=50)
     tm.set_defaults(fn=cmd_team)
+
+    pj = sub.add_parser("project", help="connect an app: a write-only key it uses to send its logs and errors")
+    pj.add_argument("action", choices=["list", "add", "rotate", "test", "remove"])
+    pj.add_argument("name", nargs="?")
+    pj.add_argument("--platform", default="other", choices=["browser", "node", "python", "logs", "other"])
+    pj.add_argument("--delete-data", action="store_true", help="remove: also delete its logs and errors")
+    pj.add_argument("--yes", action="store_true")
+    pj.set_defaults(fn=cmd_project)
 
     er = sub.add_parser("errors", help="production errors, grouped (Log Detective)")
     er.add_argument("--since", default="24h", help='"last night", "2h", "yesterday 18:00", ... (default 24h)')

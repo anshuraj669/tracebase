@@ -89,7 +89,7 @@ def collect_docker() -> dict:
     return stats
 
 
-def ingest_payload(payload: dict | str, service: str | None = None) -> dict:
+def ingest_payload(payload: dict | str, service: str | None = None, force_service: str | None = None) -> dict:
     """HTTP ingest: raw text, {"lines": [...]} or {"events": [{ts, level, message, service, stack}]}.
     In team mode a member may only send logs for services their patterns cover (PermissionError otherwise)."""
     from .. import team
@@ -109,6 +109,9 @@ def ingest_payload(payload: dict | str, service: str | None = None) -> dict:
                 events.append(Event(parse_ts(e.get("ts") or e.get("timestamp")), norm_level(e.get("level")),
                                     e.get("service") or svc, str(e.get("message", "")),
                                     stack.splitlines() if isinstance(stack, str) else list(stack), "api"))
+    if force_service:  # a project key: everything it sends is that project's, whatever the lines say
+        for e in events:
+            e.service = force_service
     denied = sorted({e.service for e in events if not team.can_service(e.service)})
     if denied:
         raise PermissionError("not allowed to send logs for: " + ", ".join(denied))

@@ -34,6 +34,23 @@ export const api = {
   secrets: () => req('GET', '/api/code/secrets'),
   reindex: () => req('POST', '/api/code/reindex'),
   me: (token) => req('GET', '/api/team/me', undefined, token),
+  // Sign-in
+  authConfig: () => req('GET', '/api/auth/config', undefined, ''),
+  googleSignIn: (credential) => req('POST', '/api/auth/google', { credential }, ''),
+  signOut: () => req('DELETE', '/api/auth/session').catch(() => {}),
+  // Team (admin)
+  members: () => req('GET', '/api/team/users'),
+  addMember: (m) => req('POST', '/api/team/users', m),
+  setMemberEmail: (name, email) => req('PUT', `/api/team/users/${encodeURIComponent(name)}/email`, { email: email || null }),
+  setMemberRepos: (name, repos) => req('PUT', `/api/team/users/${encodeURIComponent(name)}/repos`, repos),
+  removeMember: (name) => req('DELETE', `/api/team/users/${encodeURIComponent(name)}`),
+  // Connected projects
+  projects: () => req('GET', '/api/projects'),
+  project: (name) => req('GET', `/api/projects/${encodeURIComponent(name)}`),
+  addProject: (name, platform) => req('POST', '/api/projects', { name, platform }),
+  rotateProject: (name) => req('POST', `/api/projects/${encodeURIComponent(name)}/rotate`),
+  removeProject: (name, deleteData) => req('DELETE', `/api/projects/${encodeURIComponent(name)}?${qs({ delete_data: deleteData ? 'true' : undefined })}`),
+  testProject: (name) => req('POST', `/api/projects/${encodeURIComponent(name)}/test`),
   // Log Detective
   errors: ({ since, service, q }) => req('GET', `/api/logs/groups?${qs({ since, service, q, limit: 100 })}`),
   logGroup: (code) => req('GET', `/api/logs/groups/${code}`),

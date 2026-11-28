@@ -105,6 +105,25 @@ curl -s https://tracebase-demo.duckdns.org/api/team/users -H "Authorization: Bea
 They paste their token in the web page, or run `tracebase login <token> --url https://…` on their machine.
 They can also connect their AI agent with `tracebase connect claude`.
 
+### Continue with Google
+
+People can sign in with their Google account instead of pasting a token:
+
+1. [Google Cloud console](https://console.cloud.google.com/apis/credentials) → **Create credentials → OAuth
+   client ID** → Application type **Web application**. Under **Authorized JavaScript origins** add
+   `https://<your domain>` (no redirect URI is needed). If Google asks, set up the OAuth consent screen first
+   (External, your app name and email; the `email` and `profile` scopes are enough).
+2. In `deploy/.env`:
+   ```bash
+   GOOGLE_CLIENT_ID=1234567890-abc.apps.googleusercontent.com
+   ADMIN_EMAILS=you@gmail.com            # these accounts become admins on their first sign-in
+   ```
+3. `docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env up -d tracebase`
+
+Nobody else can sign in until you invite them: **Team** page → *Invite someone* (their Google email, and the
+repos and log services they may see), or `tracebase team add priya --email priya@company.com --repos "freelance/*"`.
+Sessions last 30 days; removing a member ends them at once.
+
 ## 6. Your real code and logs
 
 ```bash

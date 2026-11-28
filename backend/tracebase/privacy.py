@@ -197,7 +197,7 @@ def wipe(keep_team: bool = True) -> dict:
     tables = ["chunks_fts", "chunks", "files", "repos", "secrets", "log_events", "error_groups", "log_offsets",
               "alerts", "flag_changes", "flag_rollbacks", "kv"]
     if not keep_team:
-        tables += ["users", "audit"]
+        tables += ["sessions", "users", "audit", "projects"]
     keep_kv = {k: kv_get(k) for k in ("excluded_repos", "excluded_services", "redaction_version")}
     with indexer.lock():
         with tx() as c:

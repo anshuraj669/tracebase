@@ -77,6 +77,26 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     last_seen TEXT
 );
+-- sign-in sessions (Continue with Google): a token per browser, stored hashed, expiring
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_name TEXT NOT NULL REFERENCES users(name) ON DELETE CASCADE,
+    via TEXT NOT NULL DEFAULT 'google',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    expires_at TEXT NOT NULL
+);
+-- connected projects: apps that send their logs and errors with a write-only ingest key (tbk_...)
+CREATE TABLE IF NOT EXISTS projects (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,              -- also the service its logs are stored under
+    platform TEXT NOT NULL DEFAULT 'other',
+    key_hash TEXT NOT NULL UNIQUE,
+    key_hint TEXT NOT NULL,                 -- the first characters, to recognise a key
+    created_by TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    last_event_at TEXT,
+    events INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS audit (
     id INTEGER PRIMARY KEY,
     at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -252,6 +272,19 @@ def _open(path: str):
     return conn
 
 
+# columns added after a table first shipped: (table, column, declaration)
+COLUMNS = [("users", "email", "TEXT")]
+
+
+def _add_columns(conn) -> None:
+    for table, col, decl in COLUMNS:
+        have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if col not in have:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_email ON users(lower(email)) WHERE email IS NOT NULL")
+    conn.commit()
+
+
 def open_private():
     """A separate connection (same key and settings), for long reads that must not share the thread's connection."""
     connect()  # schema + one-time encryption first
@@ -273,6 +306,7 @@ def connect() -> sqlite3.Connection:
         conn = _open(path)
         if path not in _initialized:
             conn.executescript(SCHEMA)
+            _add_columns(conn)
             _initialized.add(path)
             for f in (path, path + "-wal", path + "-shm"):
                 try:

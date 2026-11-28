@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from pathlib import Path
 from contextlib import asynccontextmanager
 
 from typing import Any
@@ -12,11 +13,11 @@ from typing import Any
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import __version__, alerts, privacy, scheduler, team
+from . import __version__, alerts, google_auth, privacy, projects, scheduler, team
 from .reuse.bundle import bundle as make_bundle
 from .reuse.retrieve import find_examples
 from .reuse.stack import PRIMARY, detect as detect_stack
@@ -51,14 +52,26 @@ if settings.cors_origins:  # the UI is served by this app (same origin): cross-s
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
-    "Referrer-Policy": "no-referrer",
+    "Referrer-Policy": "strict-origin-when-cross-origin",  # "Continue with Google" needs the origin (not the path)
     "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
 }
 
 
+INGEST_CORS = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, OPTIONS",
+               "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Tracebase-Key",
+               "Access-Control-Max-Age": "86400"}
+
+
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
+    # connected projects send logs from their own sites (the browser SDK): ingest accepts any origin. Safe: it is
+    # authenticated by a header (never cookies), and a project key can only write its own logs.
+    ingest = request.url.path == team.INGEST
+    if ingest and request.method == "OPTIONS":
+        return Response(status_code=204, headers=INGEST_CORS)
     resp = await call_next(request)
+    if ingest:
+        resp.headers.update(INGEST_CORS)
     for k, v in SECURITY_HEADERS.items():
         resp.headers.setdefault(k, v)
     if request.url.path.startswith("/api/"):
@@ -272,6 +285,7 @@ def _group_or_404(gid: str) -> dict:
 
 @app.post("/api/logs/ingest")
 async def logs_ingest(request: Request, service: str | None = None) -> dict:
+    project = getattr(request.state, "project", None)  # sent with a project key: stored under that project
     """Send log lines from anywhere: raw text, {"lines": [...]}, {"events": [...]} or a JSON list of events.
     Personal data and secrets are redacted before anything is stored."""
     limit = settings.max_ingest_mb * 1024 * 1024
@@ -295,11 +309,19 @@ async def logs_ingest(request: Request, service: str | None = None) -> dict:
             raise HTTPException(400, 'expected {"lines": [...]}, {"events": [...]} or a list of events')
     else:
         payload = body.decode("utf-8", "replace")
+    if project:
+        n = len(payload.get("events") or payload.get("lines") or []) if isinstance(payload, dict) else payload.count("\n") + 1
+        if not projects.allow(project, max(n, 1)):
+            raise HTTPException(429, f"{project} sent more than {projects.EVENTS_PER_MINUTE} events this minute: "
+                                     "the rest of this minute's events are dropped")
     try:  # parsing + redaction is CPU work: off the event loop (the request's user context goes with it)
-        res = await run_in_threadpool(collector.ingest_payload, payload, service)
+        res = await run_in_threadpool(collector.ingest_payload, payload, project or service, project)
     except PermissionError as e:
         raise HTTPException(403, str(e))
-    team.log("logs_ingest", None, service=service, events=res["events"])
+    if project:
+        await run_in_threadpool(projects.record, project, res["events"])
+    else:
+        team.log("logs_ingest", None, service=service, events=res["events"])
     return {**res, "new_groups": [f"E-{g}" for g in res["new_groups"]]}
 
 
@@ -467,11 +489,122 @@ def alerts_read(alert_id: int | None = Body(None, embed=True)) -> dict:
     return {"ok": True}
 
 
+# ---------------------------------------------------------------- sign-in: Continue with Google
+class GoogleReq(BaseModel):
+    credential: str            # the ID token from Google's sign-in button
+
+
+@app.get("/api/auth/config")
+def auth_config() -> dict:
+    return {"team": team.enabled(), "google_client_id": settings.google_client_id if team.google_enabled() else None}
+
+
+@app.post("/api/auth/google")
+def auth_google(body: GoogleReq) -> dict:
+    if not team.google_enabled():
+        raise HTTPException(404, "Google sign-in is not turned on for this Tracebase")
+    try:
+        claims = google_auth.verify(body.credential)
+    except google_auth.GoogleAuthError as e:
+        raise HTTPException(401, str(e))
+    u = team.user_for_email(claims["email"])
+    if not u:
+        raise HTTPException(403, f"{claims['email']} isn't a member of this Tracebase yet. Ask an admin to invite "
+                                 "this email (Team page, or `tracebase team add <name> --email ...`).")
+    token = team.start_session(u["name"])
+    tok = team.set_current(team.User(u["name"], u["role"]))
+    try:
+        team.log("signed_in", None, via="google", email=claims["email"])
+    finally:
+        team._current.reset(tok)
+    return {"token": token, "name": u["name"], "role": u["role"], "email": claims["email"],
+            "picture": claims.get("picture")}
+
+
+@app.delete("/api/auth/session")
+def auth_signout(request: Request) -> dict:
+    auth = request.headers.get("authorization", "")
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    if token.startswith(team.SESSION_PREFIX):
+        team.end_session(token)
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- connected projects (write-only ingest keys)
+class ProjectReq(BaseModel):
+    name: str
+    platform: str = "other"
+
+
+@app.get("/api/projects")
+def projects_list() -> list[dict]:
+    return [p for p in projects.list_all() if team.can_service(p["name"])]
+
+
+@app.get("/api/projects/{name}")
+def project_get(name: str) -> dict:
+    team.require_service(name)
+    p = next((x for x in projects.list_all() if x["name"] == name), None)
+    if not p:
+        raise HTTPException(404, f"no project {name}")
+    return p
+
+
+@app.post("/api/projects")
+def project_create(body: ProjectReq) -> dict:
+    team.require_admin()
+    try:
+        p, key = projects.create(body.name, body.platform, team.current().name)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except FileExistsError:
+        raise HTTPException(409, f"a project called {body.name} already exists")
+    team.log("project_created", None, name=p["name"], platform=p["platform"])
+    return {**p, "key": key, "note": "shown once: put it in the app's configuration"}
+
+
+@app.post("/api/projects/{name}/rotate")
+def project_rotate(name: str) -> dict:
+    team.require_admin()
+    try:
+        key = projects.rotate(name)
+    except KeyError:
+        raise HTTPException(404, f"no project {name}")
+    team.log("project_key_rotated", None, name=name)
+    return {**projects.get(name), "key": key}
+
+
+@app.delete("/api/projects/{name}")
+def project_delete(name: str, delete_data: bool = False) -> dict:
+    team.require_admin()
+    try:
+        projects.delete(name)
+    except KeyError:
+        raise HTTPException(404, f"no project {name}")
+    res = privacy.forget_service(name) if delete_data else {}
+    team.log("project_deleted", None, name=name, delete_data=delete_data)
+    return {"deleted": name, "data": res}
+
+
+@app.post("/api/projects/{name}/test")
+def project_test(name: str) -> dict:
+    """Sends one sample error as the project would, to check the pipeline end to end."""
+    team.require_admin()
+    if not projects.get(name):
+        raise HTTPException(404, f"no project {name}")
+    res = collector.ingest_payload({"events": [{
+        "level": "error", "message": "Tracebase test event: your project is connected",
+        "stack": ["context: sent from the Connect a project page"]}]}, name, name)
+    projects.record(name, res["events"])
+    return {"ok": True, **res, "new_groups": [f"E-{g}" for g in res["new_groups"]]}
+
+
 # ---------------------------------------------------------------- team mode: members, tokens, audit log
 class MemberReq(BaseModel):
     name: str
     repos: list[str] = ["*"]   # glob patterns over repo names, e.g. ["freelance/*", "shop-api"]
     role: str = "member"
+    email: str | None = None   # lets them "Continue with Google"
 
 
 class EventReq(BaseModel):
@@ -497,12 +630,12 @@ def team_users() -> list[dict]:
 def team_add(body: MemberReq) -> dict:
     team.require_admin()
     try:
-        token = team.add_user(body.name, body.repos, body.role)
+        token = team.add_user(body.name, body.repos, body.role, body.email)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception:
         raise HTTPException(409, f"{body.name} already exists")
-    team.log("member_added", None, name=body.name, repos=body.repos, role=body.role)
+    team.log("member_added", None, name=body.name, repos=body.repos, role=body.role, email=bool(body.email))
     return {"name": body.name, "token": token, "note": "shown once: give it to the member"}
 
 
@@ -515,6 +648,23 @@ def team_repos(name: str, repos: list[str]) -> dict:
         raise HTTPException(404, f"no member {name}")
     team.log("member_repos", None, name=name, repos=repos)
     return {"name": name, "repos": repos}
+
+
+class EmailReq(BaseModel):
+    email: str | None = None
+
+
+@app.put("/api/team/users/{name}/email")
+def team_email(name: str, body: EmailReq) -> dict:
+    team.require_admin()
+    try:
+        team.set_email(name, body.email)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError:
+        raise HTTPException(404, f"no member {name}")
+    team.log("member_email", None, name=name, email=bool(body.email))
+    return {"name": name, "email": body.email}
 
 
 @app.post("/api/team/users/{name}/rotate")
@@ -655,6 +805,17 @@ def data_wipe(body: WipeReq) -> dict:
     res = privacy.wipe(keep_team=body.keep_team)
     team.log("data_wipe", None, keep_team=body.keep_team)
     return res
+
+
+SDK = Path(__file__).parent / "static" / "tracebase.js"
+
+
+@app.get("/sdk/tracebase.js", include_in_schema=False)
+def sdk_js():
+    """The browser SDK that connected projects load (<script src=".../sdk/tracebase.js" data-key="tbk_...">)."""
+    return FileResponse(SDK, media_type="text/javascript",
+                        headers={"Cache-Control": "public, max-age=3600", "Access-Control-Allow-Origin": "*",
+                                 "Cross-Origin-Resource-Policy": "cross-origin"})
 
 
 dist = settings.frontend_dist.resolve()
