@@ -61,6 +61,7 @@ def apply(gid: int, change_id: int, approved_by: str | None = None, client: Flag
                         (iso(at), gid, change_id, ch["feature"], ch["environment"], ch.get("segment"), state["id"],
                          approved_by, "watching", before, None if was_on else "flag was already off in Flagsmith"))
         rid = cur.lastrowid
+        c.execute("UPDATE error_groups SET explanation=NULL WHERE id=?", (gid,))  # its fix steps mention the rollback
     # our own change goes on the timeline too (the webhook that follows is de-duplicated by its content, not this row)
     store.record({**{k: ch.get(k) for k in store.COLS}, "ts": iso(at), "enabled_before": was_on, "enabled_after": False,
                   "value_before": None, "value_after": None, "rollout_before": None, "rollout_after": None,
@@ -84,6 +85,7 @@ def verify() -> list[dict]:
         with tx() as c:
             c.execute("UPDATE flag_rollbacks SET status=?, errors_after=?, checked_at=? WHERE id=?",
                       (status, after, iso(now()), r["id"]))
+            c.execute("UPDATE error_groups SET explanation=NULL WHERE id=?", (r["group_id"],))
             if worked:
                 c.execute("UPDATE error_groups SET status='resolved' WHERE id=? AND status IN ('new','regressed','known')",
                           (r["group_id"],))

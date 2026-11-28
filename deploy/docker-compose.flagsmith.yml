@@ -1,0 +1,89 @@
+# Self-hosted Flagsmith next to the public demo instance (tracebase-demo), for the feature-flag story in Log Detective.
+#
+#   docker compose -f docker-compose.prod.yml -f docker-compose.flagsmith.yml --env-file .env --profile demo up -d --build
+#   (setup.sh adds this file by itself once FLAGSMITH_SECRET_KEY is in deploy/.env)
+#
+# Flagsmith is NOT published to the internet: its API and dashboard listen on the server's localhost only.
+# Reach the dashboard from your laptop with an SSH tunnel:
+#   ssh -i ~/.ssh/<key> -L 8000:localhost:8000 ubuntu@<server>   then open http://localhost:8000
+# Flagsmith sends flag changes to the demo instance over the internal Docker network (signed webhook), and the demo
+# instance can turn a flag off through the Flagsmith API when an admin approves it.
+
+x-flagsmith-env: &flagsmith-env
+  DATABASE_URL: postgresql://postgres:${FLAGSMITH_DB_PASSWORD:?set FLAGSMITH_DB_PASSWORD in deploy/.env}@flagsmith-db:5432/flagsmith
+  USE_POSTGRES_FOR_ANALYTICS: 'true'
+  ENVIRONMENT: production
+  DJANGO_ALLOWED_HOSTS: '*'
+  FLAGSMITH_DOMAIN: localhost:8000
+  DJANGO_SECRET_KEY: ${FLAGSMITH_SECRET_KEY:?set FLAGSMITH_SECRET_KEY in deploy/.env}
+  TASK_RUN_METHOD: TASK_PROCESSOR
+  SSRF_ALLOWED_HOSTS: tracebase-demo.internal      # the webhook target, on the private network
+  PREVENT_SIGNUP: ${FLAGSMITH_PREVENT_SIGNUP:-true} # set to false only while creating the first user
+  ALLOW_REGISTRATION_WITHOUT_INVITE: 'true'
+  GUNICORN_WORKERS: '2'
+
+services:
+  tracebase-demo:
+    networks:
+      default:
+        aliases: [tracebase-demo.internal]   # Flagsmith only accepts webhook URLs with a dotted host name
+    environment:
+      TRACEBASE_FLAGSMITH_URL: http://flagsmith:8000
+      TRACEBASE_FLAGSMITH_API_KEY: ${DEMO_FLAGSMITH_API_KEY:-}
+      TRACEBASE_FLAGSMITH_WEBHOOK_SECRET: ${DEMO_FLAGSMITH_WEBHOOK_SECRET:-}
+
+  flagsmith-db:
+    image: postgres:15.5-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${FLAGSMITH_DB_PASSWORD}
+      POSTGRES_DB: flagsmith
+    volumes:
+      - flagsmith-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -d flagsmith -U postgres']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  flagsmith-migrate:
+    image: docker.flagsmith.com/flagsmith/flagsmith:${FLAGSMITH_VERSION:-2.295.2}
+    command: [migrate]
+    environment: *flagsmith-env
+    healthcheck:
+      disable: true
+    depends_on:
+      flagsmith-db:
+        condition: service_healthy
+
+  flagsmith:
+    image: docker.flagsmith.com/flagsmith/flagsmith:${FLAGSMITH_VERSION:-2.295.2}
+    restart: unless-stopped
+    command: [serve]
+    environment: *flagsmith-env
+    ports: ["127.0.0.1:8000:8000"]   # localhost only: use an SSH tunnel
+    depends_on:
+      flagsmith-migrate:
+        condition: service_completed_successfully
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  flagsmith-task-processor:   # sends the webhooks (and retries them)
+    image: docker.flagsmith.com/flagsmith/flagsmith:${FLAGSMITH_VERSION:-2.295.2}
+    restart: unless-stopped
+    command: [run-task-processor]
+    environment: *flagsmith-env
+    depends_on:
+      flagsmith-migrate:
+        condition: service_completed_successfully
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  flagsmith-pgdata:

@@ -94,15 +94,19 @@ FRAME_PATTERNS = [
 
 
 def extract_frames(text: str, limit: int = 15) -> list[Frame]:
+    """The stack frames in your own code (libraries skipped), innermost first: the line that failed comes first."""
     frames: list[Frame] = []
     seen = set()
+    python = False
     for line in text.splitlines():
-        for pat in FRAME_PATTERNS:
+        for i, pat in enumerate(FRAME_PATTERNS):
             m = pat.search(line)
             if not m:
                 continue
+            python = python or i == 0
             path = m.group("path").replace("file://", "").replace("webpack:///", "")
-            if any(x in path for x in ("/vendor/", "node_modules/", "/site-packages/", "/usr/lib/", "internal/", "<frozen")):
+            if any(x in path for x in ("/vendor/", "node_modules/", "/site-packages/", "/usr/lib/", "/usr/local/lib/",
+                                       "internal/", "<frozen")):
                 break
             key = (path, int(m.group("line")))
             if key not in seen:
@@ -110,9 +114,9 @@ def extract_frames(text: str, limit: int = 15) -> list[Frame]:
                 func = m.groupdict().get("func")
                 frames.append(Frame(path, int(m.group("line")), func.strip() if func else None))
             break
-        if len(frames) >= limit:
-            break
-    return frames
+    if python:  # Python prints the innermost call last ("most recent call last"); PHP, Java and Node print it first
+        frames.reverse()
+    return frames[:limit]
 
 
 def service_from_source(source: str) -> str:
@@ -129,6 +133,10 @@ def service_from_source(source: str) -> str:
     return name or "app"
 
 
+# fields that never explain anything on their own (ids, process info): not repeated as context
+_JSON_SKIP = {"logger", "request_id", "trace_id", "span_id", "pid", "hostname", "host", "v"}
+
+
 def _parse_json(line: str, default_service: str) -> Event | None:
     try:
         o = json.loads(line)
@@ -136,13 +144,18 @@ def _parse_json(line: str, default_service: str) -> Event | None:
         return None
     if not isinstance(o, dict):
         return None
-    ts = next((o[k] for k in ("ts", "time", "timestamp", "@timestamp", "datetime", "date", "t") if k in o), None)
-    level = next((o[k] for k in ("level", "severity", "levelname", "log.level", "lvl", "level_name") if k in o), None)
-    msg = next((o[k] for k in ("message", "msg", "error", "event", "text") if k in o), "")
-    svc = next((o[k] for k in ("service", "app", "service.name", "logger", "name", "channel", "component") if k in o), default_service)
+    def pick(keys):  # the first of these keys present: (key, value)
+        return next(((k, o[k]) for k in keys if k in o), (None, None))
+    k_ts, ts = pick(("ts", "time", "timestamp", "@timestamp", "datetime", "date", "t"))
+    k_lv, level = pick(("level", "severity", "levelname", "log.level", "lvl", "level_name"))
+    k_msg, msg = pick(("message", "msg", "error", "event", "text"))
+    msg = msg or ""
+    k_svc, svc = pick(("service", "app", "service.name", "logger", "name", "channel", "component"))
+    svc = svc or default_service
     if isinstance(msg, dict):
         msg = json.dumps(msg)
-    stack_val = next((o[k] for k in ("stack", "stack_trace", "stacktrace", "exc_info", "trace", "exception") if k in o), None)
+    k_st, stack_val = pick(("stack", "stack_trace", "stacktrace", "exc_info", "trace", "exception"))
+    used = {k_ts, k_lv, k_msg, k_svc, k_st, "err"}
     stack: list[str] = []
     if isinstance(stack_val, str):
         stack = stack_val.splitlines()
@@ -153,6 +166,12 @@ def _parse_json(line: str, default_service: str) -> Event | None:
     if isinstance(o.get("err"), dict):  # pino
         msg = msg or o["err"].get("message", "")
         stack = str(o["err"].get("stack", "")).splitlines()
+    # the other structured fields (error="ReadTimeout", circuit=..., attempt=3) explain the line: keep them as
+    # context next to the stack, not in the message, so lines that differ only by ids still group together
+    context = [f"{k}={v}" for k, v in o.items() if k not in used and k not in _JSON_SKIP
+               and isinstance(v, (str, int, float, bool)) and v != "" and len(str(v)) < 300]
+    if context:
+        stack = ["context: " + ", ".join(context)[:1000]] + stack
     return Event(parse_ts(ts), norm_level(level), str(svc), str(msg), stack)
 
 

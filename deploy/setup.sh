@@ -103,7 +103,10 @@ echo "also open ports 80 and 443 in the AWS console (Lightsail: Networking tab Â
 
 say "Building and starting (first build takes a few minutes)"
 cd "$HERE"
-docker compose -f docker-compose.prod.yml --env-file "$ENV" "${PROFILE[@]}" up -d --build
+FILES=(-f docker-compose.prod.yml)
+# self-hosted Flagsmith next to the public demo (feature flags in Log Detective), once it was set up: see README
+grep -q '^FLAGSMITH_SECRET_KEY=.' "$ENV" && FILES+=(-f docker-compose.flagsmith.yml)
+docker compose "${FILES[@]}" --env-file "$ENV" "${PROFILE[@]}" up -d --build
 
 say "Repo sync every 15 minutes (git pull of everything in REPOS_DIR)"
 install -m 0755 "$HERE/pull-repos.sh" /usr/local/bin/tracebase-pull-repos

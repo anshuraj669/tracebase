@@ -186,6 +186,7 @@ def _age_rollbacks(minutes):
     from tracebase.timeutil import iso, now
     with tx() as c:
         c.execute("UPDATE flag_rollbacks SET created_at=?", (iso(now() - timedelta(minutes=minutes)),))
+        c.execute("UPDATE flag_changes SET ts=? WHERE source='tracebase'", (iso(now() - timedelta(minutes=minutes)),))
 
 
 def test_rollback_needs_approval_then_turns_the_flag_off_and_resolves_the_error(flags, fake_flagsmith):
@@ -210,6 +211,8 @@ def test_rollback_needs_approval_then_turns_the_flag_off_and_resolves_the_error(
     done = verify()
     assert done[0]["status"] == "worked"
     assert flags.get(f"/api/logs/groups/{g['code']}").json()["status"] == "resolved"
+    fix = flags.post(f"/api/logs/groups/{g['code']}/explain").json()["fix"][0]  # no stale "turn it off now"
+    assert fix.startswith("The flag 'new_checkout' was turned off from Tracebase at"), fix
     assert any("stopped after turning off 'new_checkout'" in a["title"] for a in flags.get("/api/alerts").json())
     # rollbacks are Tracebase's fix, never a new suspect
     assert all(x["change"]["source"] != "tracebase" for x in flags.get(f"/api/logs/groups/{g['code']}/flags").json()["suspects"])
@@ -232,6 +235,9 @@ def test_only_admins_can_turn_flags_off(flags, fake_flagsmith, monkeypatch):
     monkeypatch.setattr(settings, "admin_token", ADMIN)
     tok = flags.post("/api/team/users", json={"name": "ravi", "repos": ["shop-api"]},
                      headers={"Authorization": f"Bearer {ADMIN}"}).json()["token"]
+    seen = flags.get(f"/api/logs/groups/{g['code']}/flags", headers={"Authorization": f"Bearer {tok}"}).json()
+    assert seen["suspects"] and seen["flagsmith_connected"] and not seen["can_change_flags"]  # no button for members
+    assert flags.get(f"/api/logs/groups/{g['code']}/flags", headers={"Authorization": f"Bearer {ADMIN}"}).json()["can_change_flags"]
     r = flags.post(f"/api/logs/groups/{g['code']}/rollback", json={"change_id": s["change"]["id"], "confirm": True},
                    headers={"Authorization": f"Bearer {tok}"})
     assert r.status_code == 403 and fake_flagsmith.calls == []
@@ -269,3 +275,13 @@ def test_error_that_comes_back_after_a_rollback_blames_the_new_flag_change(flags
     assert verify()[0]["status"] == "worked"
     info = flags.get(f"/api/logs/groups/{g['code']}/flags").json()
     assert info["suspects"][0]["change"]["changed_by"] == "ravi@shop.test"
+
+
+def test_flag_already_turned_off_in_the_dashboard_is_not_offered_again(flags):
+    start = datetime.now().replace(microsecond=0) - timedelta(minutes=30)
+    g, s = _suspect(flags, start)
+    assert s["can_roll_back"] and not s["already_off"]
+    body, h = signed(flag_webhook(True, False, start + timedelta(minutes=2)))  # someone turned it off in Flagsmith
+    flags.post("/api/flags/webhook", content=body, headers=h)
+    on = [x for x in flags.get(f"/api/logs/groups/{g['code']}/flags").json()["suspects"] if x["change"]["enabled_after"]]
+    assert on and on[0]["already_off"] and not on[0]["can_roll_back"]

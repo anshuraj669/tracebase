@@ -9,7 +9,7 @@
   python3 demo/flags_demo.py on           # or flip new_checkout in the Flagsmith dashboard: checkouts start failing
   tracebase errors && tracebase why E-<n> --rollback
 
-Standard library only. Settings are saved to demo/.flags-demo.json (not committed).
+Standard library only. Settings are saved to demo/.flags-demo.json (not committed), or the file in $FLAGS_DEMO_STATE.
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-STATE = HERE / ".flags-demo.json"
+STATE = Path(os.environ.get("FLAGS_DEMO_STATE") or HERE / ".flags-demo.json")  # one file per Flagsmith (local, server)
 CHECKOUT = HERE / "volume1/repos/shop-api/app/Services/CheckoutV2.php"
 CONTROLLER = HERE / "volume1/repos/shop-api/app/Http/Controllers/CheckoutController.php"
 FLAG = "new_checkout"

@@ -431,7 +431,9 @@ def logs_group_flags(gid: str) -> dict:
     g = _group_or_404(gid)
     code = code_context(g["frames"], g["service"])
     return {"group": g["code"], "suspects": flag_suspects.for_group(g, code),
-            "rollbacks": flag_store.rollbacks(g["id"]), "can_change_flags": flagsmith_api.configured()}
+            "rollbacks": flag_store.rollbacks(g["id"]), "flagsmith_connected": flagsmith_api.configured(),
+            # turning a flag off is for admins: members see the suspect, not a button that would be refused
+            "can_change_flags": flagsmith_api.configured() and team.current().is_admin}
 
 
 class RollbackReq(BaseModel):

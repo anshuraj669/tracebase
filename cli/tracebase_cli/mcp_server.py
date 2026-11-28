@@ -269,8 +269,14 @@ def build_server(api: Client, workspace: Path | None = None) -> FastMCP:
             return f"Tracebase error: {e}"
         s = next((x for x in info.get("suspects") or [] if x.get("can_roll_back")), None)
         if not s:
+            off = next((x for x in info.get("suspects") or [] if x.get("already_off")), None)
+            if off:
+                return f"'{off['change']['feature']}' is already off again. Nothing changed."
             return f"No feature flag that was turned on before {gid} can be turned off. Nothing changed."
         if not info.get("can_change_flags"):
+            if info.get("flagsmith_connected"):
+                return ("Only a Tracebase admin can turn flags off, and this token is not an admin's. Nothing changed: "
+                        f"ask an admin to run `tracebase why {gid} --rollback`.")
             return "Tracebase is not connected to the Flagsmith API (TRACEBASE_FLAGSMITH_URL / _API_KEY). Nothing changed."
         ch = s["change"]
         where = (ch.get("environment") or "?") + (f" (segment {ch['segment']})" if ch.get("segment") else "")

@@ -63,7 +63,7 @@ Code  shop-api/app/Services/CheckoutV2.php:24
   ›  24              $rate  = $rates[$cart['currency']];
 Last changed by  22256cb Checkout v2: charge in the shopper's currency (behind new_checkout flag)  2026-11-02
 Fix
-  1. Turn off the flag 'new_checkout' in Production now (kill switch): tracebase why E-6 --rollback, …
+  1. Turn off the flag 'new_checkout' in Production now (kill switch): an admin can run tracebase why E-6 --rollback, …
 
 $ tracebase why E-6 --rollback
 Turn off the flag 'new_checkout' in Production through Flagsmith? [y/N] y

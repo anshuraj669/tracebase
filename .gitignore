@@ -30,5 +30,5 @@ docs/
 cli/dist/
 
 # flags demo state (Flagsmith API key, webhook secret)
-demo/.flags-demo.json
+demo/.flags-demo*.json
 /.env

@@ -17,7 +17,7 @@ export default function LogsPage({ onOpen, stats, selected }) {
   const [q, setQ] = useState('')
   const [groups, setGroups] = useState(null)
   const [services, setServices] = useState([])
-  const [timeline, setTimeline] = useState([])
+  const [timeline, setTimeline] = useState(null)
   const [flagChanges, setFlagChanges] = useState([])
   const [alerts, setAlerts] = useState([])
   const [err, setErr] = useState(null)
@@ -29,10 +29,15 @@ export default function LogsPage({ onOpen, stats, selected }) {
     api.alerts(true).then(setAlerts).catch(() => {})
   }, [tick])
   useEffect(() => {
+    // answers to an older filter can arrive after newer ones (all services is the slow one): drop them
+    let live = true
+    const only = (set) => (v) => { if (live) set(v) }
     setErr(null)
-    api.errors({ since, service, q }).then(setGroups).catch((e) => setErr(e.message))
-    api.logTimeline(service).then(setTimeline).catch(() => setTimeline([]))
-    api.flagChanges('31d').then(setFlagChanges).catch(() => setFlagChanges([]))
+    setTimeline(null)
+    api.errors({ since, service, q }).then(only(setGroups)).catch((e) => only(setErr)(e.message))
+    api.logTimeline(service).then(only(setTimeline)).catch(() => only(setTimeline)([]))
+    api.flagChanges('31d').then(only(setFlagChanges)).catch(() => only(setFlagChanges)([]))
+    return () => { live = false }
   }, [since, service, q, tick])
 
   const open = (code) => { location.hash = code ? `logs/${code}` : 'logs' }
@@ -109,6 +114,7 @@ function Kpi({ icon, tone, n, label, bad }) {
 }
 
 function Timeline({ rows, flags = [] }) {
+  if (rows === null) return <p className="muted small">Loading…</p>
   const max = Math.max(1, ...rows.map((r) => r.errors || 0))
   if (!rows.length) return <p className="muted small">No log lines yet. Drop log files into the logs folder, or send some below.</p>
   const w = 100 / rows.length
@@ -283,9 +289,12 @@ function FlagSuspects({ code, explained, onChange }) {
               did_not_help: `Turned off, but ${rb.errors_after} errors came after: the flag was not the (only) cause.`,
               failed: `Could not turn it off: ${rb.note}`,
             }[rb.status]}</p>
+              : s.already_off ? <p className="muted small">Already turned off again in {ch.environment}.</p>
               : s.can_roll_back && (info.can_change_flags
                 ? <button className="primary btn danger" disabled={busy} onClick={() => turnOff(s)}>Turn off “{ch.feature}”</button>
-                : <p className="muted small">Connect the Flagsmith API (TRACEBASE_FLAGSMITH_URL and _API_KEY) to turn it off from here.</p>)}
+                : <p className="muted small">{info.flagsmith_connected
+                  ? 'Only a Tracebase admin can turn flags off from here.'
+                  : 'Connect the Flagsmith API (TRACEBASE_FLAGSMITH_URL and _API_KEY) to turn it off from here.'}</p>)}
           </div>
         )
       })}

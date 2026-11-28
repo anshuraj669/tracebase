@@ -376,7 +376,11 @@ def cmd_why(args: argparse.Namespace, api: Client) -> int:
     src = "rules + your code and git history" if r.get("source") == "rules" else f"local LLM ({r.get('source')})"
     print(ui.dim(f"\n  explained by {src} · mark it: tracebase resolve {gid} [--as known|ignored]"))
     top = next((s for s in r.get("flags") or [] if s.get("can_roll_back")), None)
+    off = next((s for s in r.get("flags") or [] if s.get("already_off")), None)
     if args.rollback:
+        if not top and off:
+            print(f"  '{off['change']['feature']}' is already off again. Nothing changed.")
+            return 0
         return _rollback(api, gid, top, args.yes)
     if top:
         print(ui.dim(f"  turn off '{top['change']['feature']}' (asks first): tracebase why {gid} --rollback"))

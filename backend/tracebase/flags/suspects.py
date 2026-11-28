@@ -118,6 +118,15 @@ def incident_start(g: dict):
     return start
 
 
+def _turned_off_since(ch: dict) -> bool:
+    """A later change (a rollback, or someone in the dashboard) already turned this flag off again."""
+    last = row("SELECT enabled_after FROM flag_changes WHERE feature=? AND IFNULL(environment_id, -1)=IFNULL(?, -1) "
+               "AND IFNULL(segment, '')=IFNULL(?, '') AND IFNULL(identity, '')=IFNULL(?, '') AND (ts>? OR (ts=? AND id>?)) "
+               "ORDER BY ts DESC, id DESC LIMIT 1",
+               (ch["feature"], ch.get("environment_id"), ch.get("segment"), ch.get("identity"), ch["ts"], ch["ts"], ch["id"]))
+    return bool(last) and last["enabled_after"] == 0
+
+
 def for_group(g: dict, code: list[dict]) -> list[dict]:
     """Flag changes that are suspects for the current incident of this error group, best first."""
     first = incident_start(g)
@@ -139,12 +148,15 @@ def for_group(g: dict, code: list[dict]) -> list[dict]:
         score = round((closeness * 2 + LINK_WEIGHT[kind]) * risky, 3)
         out.append({"change": ch, "minutes_before_first_error": minutes, "incident_start": started, "link": kind,
                     "link_reason": LINK_TEXT.get(kind), "flag_check": ref, "score": score,
-                    "can_roll_back": bool(ch.get("enabled_after")) and ch.get("provider") == "flagsmith"})
-    # the same flag changed several times: keep its latest change before the error
+                    "already_off": (off := _turned_off_since(ch)),
+                    "can_roll_back": bool(ch.get("enabled_after")) and ch.get("provider") == "flagsmith" and not off})
+    # the same flag changed several times: keep its latest change before the error (a change just after the errors
+    # started, such as someone turning it off again, must not hide the one that caused them)
     best: dict[tuple, dict] = {}
+    order = lambda s: (s["minutes_before_first_error"] >= 0, s["change"]["ts"])
     for s in out:
         k = (s["change"]["feature"], s["change"]["environment"], s["change"].get("segment"))
-        if k not in best or s["change"]["ts"] > best[k]["change"]["ts"]:
+        if k not in best or order(s) > order(best[k]):
             best[k] = s
     ranked = sorted(best.values(), key=lambda s: -s["score"])
     # without a code link, only a change right before the error is worth naming

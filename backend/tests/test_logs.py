@@ -163,3 +163,100 @@ def test_member_explanation_hides_other_services(api, logs):
     r = api.post(f"/api/logs/groups/E-{_gid(groups, 'checkout:SQLSTATE')}/explain", headers=_h(tok)).json()
     assert r["events"] == []  # db / nightly-backup are not theirs
     assert "nightly-backup" not in r["cause"]
+
+
+def test_python_frames_come_innermost_first_and_skip_libraries():
+    """Python prints the failing call last: Tracebase must show it first, like PHP/Java traces, past library frames."""
+    tb = "\n".join([
+        "Traceback (most recent call last):",
+        '  File "/app/bazaar/api/main.py", line 70, in edge',
+        "    resp = await call_next(request)",
+        '  File "/usr/local/lib/python3.12/site-packages/starlette/routing.py", line 73, in app',
+        "    response = await f(request)",
+        '  File "/app/bazaar/api/main.py", line 182, in create_order',
+        "    order, created = await orders.create_order(user_id, items, key)",
+        '  File "/app/bazaar/services/orders.py", line 57, in create_order',
+        "    avg_item_cents = subtotal // len(items)",
+        "ZeroDivisionError: integer division or modulo by zero",
+    ])
+    frames = extract_frames(tb)
+    assert [(f.path, f.line) for f in frames] == [
+        ("/app/bazaar/services/orders.py", 57), ("/app/bazaar/api/main.py", 182), ("/app/bazaar/api/main.py", 70)]
+    assert frames[0].func == "create_order"
+
+
+def test_structured_fields_are_kept_as_context_not_in_the_message():
+    from tracebase.logs.parser import parse_text
+    line = ('{"ts": "2026-11-27T14:20:14+00:00", "level": "WARNING", "service": "bazaar-worker", "logger": "x", '
+            '"msg": "payment provider charge failed, retrying", "request_id": "ab12", "attempt": 2, '
+            '"error": "ReadTimeout: timed out"}')
+    ev = parse_text(line, source="worker.log")[0]
+    assert ev.message == "payment provider charge failed, retrying"      # grouping unchanged
+    assert ev.stack[0] == "context: attempt=2, error=ReadTimeout: timed out"  # ids and logger left out
+
+
+def test_dependency_outage_in_another_service_is_found_among_busy_logs(indexed, monkeypatch):
+    """The provider's 503s are found even when other services log thousands of lines around them."""
+    monkeypatch.setattr(settings, "admin_token", "")
+    from datetime import datetime, timedelta
+    from tracebase.db import tx
+    from tracebase.logs import grouper
+    from tracebase.logs.collector import ingest_payload
+    from tracebase.logs.explain import explain_group
+    with tx() as c:
+        for t in ("log_events", "error_groups", "alerts"):
+            c.execute(f"DELETE FROM {t}")
+    t0 = datetime(2026, 11, 27, 14, 20, 0)
+    busy = [{"ts": (t0 - timedelta(minutes=4) + timedelta(milliseconds=50 * i)).isoformat(), "level": "info",
+             "service": "api", "message": f"GET /v1/products/{i % 40} -> 200"} for i in range(3000)]
+    outage = [{"ts": (t0 + timedelta(seconds=s)).isoformat(), "level": "warning", "service": "payments-provider",
+               "message": "payments: outage, returning 503"} for s in (2, 5, 9)]
+    opened = [{"ts": (t0 + timedelta(seconds=14)).isoformat(), "level": "error", "service": "worker",
+               "message": "circuit opened"}]
+    ingest_payload({"events": busy + outage + opened})
+    g = next(g for g in grouper.find_errors(limit=50) if g["title"] == "circuit opened")
+    r = explain_group(g["id"], refresh=True)
+    assert any(e["service"] == "payments-provider" and "503" in e["message"] for e in r["events"])
+    assert r["cause"].startswith("A dependency (an external API or another service) was failing or down")
+
+
+def test_cached_explanation_keeps_its_numbers_current(indexed, monkeypatch):
+    """The cause is cached, but the impact must follow the group: a cached '2 occurrences' must not stick."""
+    monkeypatch.setattr(settings, "admin_token", "")
+    from datetime import datetime, timedelta
+    from tracebase.db import tx
+    from tracebase.logs import grouper
+    from tracebase.logs.collector import ingest_payload
+    from tracebase.logs.explain import explain_group
+    with tx() as c:
+        for t in ("log_events", "error_groups", "alerts"):
+            c.execute(f"DELETE FROM {t}")
+    t0 = datetime(2026, 11, 27, 14, 11, 0)
+    err = lambda i: {"ts": (t0 + timedelta(minutes=i)).isoformat(), "level": "error", "service": "api",
+                     "message": "unhandled error on POST /v1/orders"}
+    ingest_payload({"events": [err(0), err(1)]})
+    gid = next(g for g in grouper.find_errors(limit=50) if g["service"] == "api")["id"]
+    assert explain_group(gid)["impact"].startswith("2 occurrences")
+    ingest_payload({"events": [err(i) for i in range(2, 1502)]})
+    r = explain_group(gid)
+    assert r["cached"] and r["impact"].startswith("1,502 occurrences between 2026-11-27 14:11 and 2026-11-28 15:12 (~25 hours)")
+
+
+def test_impact_of_an_error_that_came_back_describes_this_incident(indexed, monkeypatch):
+    monkeypatch.setattr(settings, "admin_token", "")
+    from datetime import datetime, timedelta
+    from tracebase.db import tx
+    from tracebase.logs import grouper
+    from tracebase.logs.collector import ingest_payload
+    from tracebase.logs.explain import explain_group
+    with tx() as c:
+        for t in ("log_events", "error_groups", "alerts"):
+            c.execute(f"DELETE FROM {t}")
+    err = lambda t: {"ts": t.isoformat(), "level": "error", "service": "api", "message": "boom in checkout"}
+    yesterday, today = datetime(2026, 11, 27, 20, 51), datetime(2026, 11, 28, 12, 48)
+    ingest_payload({"events": [err(yesterday + timedelta(seconds=10 * i)) for i in range(100)]
+                    + [err(today + timedelta(seconds=10 * i)) for i in range(30)]})
+    gid = next(g for g in grouper.find_errors(limit=50) if g["service"] == "api")["id"]
+    impact = explain_group(gid, refresh=True)["impact"]
+    assert impact == ("This time: 30 occurrences since 12:48 (~4 minutes) (130 in all since 2026-11-27 20:51). "
+                      "Before it came back, api logged 0.0 other errors/hour."), impact

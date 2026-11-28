@@ -10,7 +10,7 @@ from .. import team
 from ..code import git
 from ..code.search import read_code, resolve_path
 from ..db import rows, tx
-from ..flags import suspects as flag_suspects
+from ..flags import store as flag_store, suspects as flag_suspects
 from ..llm import LLMUnavailable, llm
 from ..timeutil import iso, parse_ts
 from .grouper import get_group, rate_stats
@@ -31,6 +31,12 @@ RULES = [
      "Webhook signature verification failed — the signing secret differs between sender and receiver, or the raw body was modified before verification.",
      ["Confirm the webhook signing secret in the environment matches the provider dashboard.",
       "Verify the signature against the raw request body (before JSON parsing/middleware)."]),
+    (r"circuit (is )?open|circuit opened|CircuitOpen|temporarily unavailable|service unavailable|\b503\b",
+     "A dependency (an external API or another service) was failing or down, so calls to it timed out or were cut "
+     "off by the circuit breaker.",
+     ["Check the dependency's status and its own logs at that time (see the events in other services).",
+      "Keep failing fast while it is down (circuit breaker) and retry the queued work once it recovers.",
+      "If it stays down, fail the affected requests clearly instead of leaving them pending."]),
     (r"timed? ?out|timeout|deadline exceeded|ETIMEDOUT|504",
      "An operation took longer than its timeout — a slow query, slow upstream, or network issue.",
      ["Find the slow query/endpoint in the logs around that time.", "Add indexes or raise the timeout with back-off."]),
@@ -47,6 +53,10 @@ RULES = [
      ["Use upsert / idempotency keys.", "Catch the constraint error and return a friendly message."]),
     (r"too many connections|1040|remaining connection slots",
      "The database ran out of connections.", ["Use a connection pool and close connections.", "Raise max_connections if needed."]),
+    (r"ZeroDivisionError|division by zero|DivideByZero|ArithmeticException: / by zero",
+     "A value was divided by zero: a count or total the code divides by was 0 (an empty list, no items, no rows).",
+     ["Guard the division (return 0 or skip the metric when the divisor is 0).",
+      "Reject the empty input at the edge if it is not valid (e.g. a minimum length on the request field)."]),
     (r"SQLSTATE|syntax error|QueryException|ProgrammingError",
      "A database query failed.", ["Inspect the failing SQL and recent migrations."]),
 ]
@@ -98,22 +108,46 @@ def _ago(minutes: int) -> str:
 
 
 EVENT_HINTS = r"(shut ?down|shutting down|restart|stopp(ed|ing)|starting|started|ready for connections|killed|OOM|deploy|backup|dump|migrat|SIGTERM|exited|unhealthy)"
+# a dependency failing: what another service (or a simulated third party) says when it is the cause
+DEPENDENCY_HINTS = r"(\b50[234]\b|unavailable|outage|timed? ?out|timeout|refused|circuit|overloaded|too many connections)"
+_LIKE = {  # the same words for SQL, so the scan doesn't stop at the first few hundred lines of a busy service
+    "lifecycle": ["shutdown", "shut down", "shutting down", "restart", "stopped", "stopping", "starting", "started",
+                  "ready for connections", "killed", "OOM", "deploy", "backup", "dump", "migrat", "SIGTERM", "exited",
+                  "unhealthy"],
+    "dependency": ["502", "503", "504", "unavailable", "outage", "timed out", "timeout", "refused", "circuit",
+                   "overloaded", "too many connections"],
+}
+
+
+def _like_any(words: list[str]) -> tuple[str, list[str]]:
+    return "(" + " OR ".join("message LIKE ?" for _ in words) + ")", [f"%{w}%" for w in words]
 
 
 def nearby_events(g: dict, minutes: int = 5) -> list[dict]:
-    """Notable events in *other* services around the time the error group started (restarts, deploys, backups)."""
+    """Notable events in *other* services around the time the error group started: restarts, deploys and backups
+    (from a few minutes before to well after), and dependencies failing (warnings and errors just before or as it
+    started: a provider's 503s, timeouts, a circuit breaker opening)."""
     dt = parse_ts(g.get("first_seen"))
     if not dt:
         return []
-    cand = rows("SELECT ts, level, service, message FROM log_events WHERE ts BETWEEN ? AND ? AND service != ? ORDER BY ts LIMIT 400",
-                (iso(dt - timedelta(minutes=minutes)), iso(dt + timedelta(minutes=45)), g["service"]))
+    life, lp = _like_any(_LIKE["lifecycle"])
+    dep, dp = _like_any(_LIKE["dependency"])
+    cand = rows(f"SELECT ts, level, service, message FROM log_events WHERE ts BETWEEN ? AND ? AND service != ? AND {life}"
+                " ORDER BY ts LIMIT 400",
+                (iso(dt - timedelta(minutes=minutes)), iso(dt + timedelta(minutes=45)), g["service"], *lp))
+    cand += rows(f"SELECT ts, level, service, message FROM log_events WHERE ts BETWEEN ? AND ? AND service != ?"
+                 f" AND level IN ('WARNING','ERROR','CRITICAL') AND {dep} ORDER BY ts LIMIT 400",
+                 (iso(dt - timedelta(minutes=minutes)), iso(dt + timedelta(minutes=2)), g["service"], *dp))
     out, seen = [], set()
-    for e in cand:
+    for e in sorted(cand, key=lambda e: e["ts"]):
         if not team.can_service(e["service"]):  # a member only sees services they have access to
             continue
-        if re.search(EVENT_HINTS, e["message"], re.I) and (e["service"], e["message"][:60]) not in seen:
-            seen.add((e["service"], e["message"][:60]))
-            out.append({**e, "message": e["message"][:200]})
+        first = e["message"].split("\n", 1)[0]  # not the stack trace below it ("line 503" is no HTTP 503)
+        hit = re.search(EVENT_HINTS, first, re.I) or (
+            e["level"] in ("WARNING", "ERROR", "CRITICAL") and re.search(DEPENDENCY_HINTS, first, re.I))
+        if hit and (e["service"], first[:60]) not in seen:
+            seen.add((e["service"], first[:60]))
+            out.append({**e, "message": first[:200]})
     return out[:8]
 
 
@@ -156,16 +190,41 @@ def _heuristic(g: dict, code: list[dict], stats: dict, events: list[dict] | None
         flag_text = flag_suspects.sentence(top)
         cause = (flag_text + " " + cause) if top["link"] in ("guards", "call_path") else (cause + " " + flag_text)
         ch = top["change"]
-        if top["can_roll_back"]:
+        done = next((r for r in flag_store.rollbacks(g.get("id")) if r["change_id"] == ch["id"]
+                     and r["status"] in ("watching", "worked")), None)
+        if done:
+            fixes.insert(0, f"The flag '{ch['feature']}' was turned off from Tracebase at {done['created_at'][11:16]}: "
+                            "fix the code below before turning it back on.")
+        elif top["can_roll_back"]:
             fixes.insert(0, f"Turn off the flag '{ch['feature']}' in {ch['environment']} now (kill switch): "
-                            f"tracebase why {g['code']} --rollback, or the button in Log Detective.")
-    dur = _duration(g)
-    impact = (f"1 occurrence at {g['first_seen'][:16].replace('T', ' ')}." if g["count"] == 1 else
-              f"{g['count']} occurrences between {g['first_seen'][11:16]} and {g['last_seen'][11:16]}{dur}.")
-    normal = baseline_before(g["service"], g["first_seen"])
+                            f"an admin can run tracebase why {g['code']} --rollback, or use the button in Log Detective.")
+    return {"cause": cause, "impact": impact_of(g), "fix": fixes, "source": "rules"}
+
+
+def impact_of(g: dict) -> str:
+    """How often and for how long. Always computed from the group as it is now (never cached: the count keeps growing)."""
+    if g["count"] == 1:
+        return f"1 occurrence at {g['first_seen'][:16].replace('T', ' ')}."
+    first, start = parse_ts(g["first_seen"]), flag_suspects.incident_start(g)
+    if g.get("id") and first and start and start - first > timedelta(minutes=1):
+        # it came back: describe this incident, with the history as a footnote
+        since = iso(start)
+        n = rows("SELECT COUNT(*) n FROM log_events WHERE group_id=? AND ts>=?", (g["id"], since))[0]["n"]
+        now_part = {**g, "first_seen": since}
+        impact = (f"This time: {n:,} occurrence{'s' if n != 1 else ''} since {since[11:16]}{_duration(now_part)}"
+                  f" ({g['count']:,} in all since {g['first_seen'][:16].replace('T', ' ')}).")
+        normal = baseline_before(g["service"], since, exclude_group=g["id"])
+        if normal is not None:
+            return impact + f" Before it came back, {g['service']} logged {normal:.1f} other errors/hour."
+        return impact
+    else:
+        a, b = g["first_seen"], g["last_seen"]
+        span = f"{a[11:16]} and {b[11:16]}" if a[:10] == b[:10] else f"{a[:16].replace('T', ' ')} and {b[:16].replace('T', ' ')}"
+        impact = f"{g['count']:,} occurrences between {span}{_duration(g)}."
+        normal = baseline_before(g["service"], g["first_seen"])
     if normal is not None:
         impact += f" Before it started, {g['service']} logged {normal:.1f} errors/hour."
-    return {"cause": cause, "impact": impact, "fix": fixes, "source": "rules"}
+    return impact
 
 
 def suggest_line_fix(line: str) -> str | None:
@@ -179,8 +238,9 @@ def suggest_line_fix(line: str) -> str | None:
     return None
 
 
-def baseline_before(service: str, first_seen: str | None, hours: int = 24) -> float | None:
-    """Errors per hour in this service in the `hours` before the group first appeared (the 'normal' rate)."""
+def baseline_before(service: str, first_seen: str | None, hours: int = 24, exclude_group: int | None = None) -> float | None:
+    """Errors per hour in this service in the `hours` before the group first appeared (the 'normal' rate).
+    `exclude_group` leaves out an error's own earlier incidents (it came back: they are not 'normal')."""
     first = parse_ts(first_seen)
     if not first:
         return None
@@ -189,8 +249,8 @@ def baseline_before(service: str, first_seen: str | None, hours: int = 24) -> fl
     t0 = parse_ts(r["t0"])
     if not t0:
         return None  # no history before it: no honest baseline
-    errs = rows("SELECT COUNT(*) n FROM log_events WHERE service=? AND level IN ('ERROR','CRITICAL') AND ts>=? AND ts<?",
-                (service, lo, iso(first)))[0]["n"]
+    errs = rows("SELECT COUNT(*) n FROM log_events WHERE service=? AND level IN ('ERROR','CRITICAL') AND ts>=? AND ts<?"
+                " AND IFNULL(group_id, -1) != ?", (service, lo, iso(first), exclude_group or -1))[0]["n"]
     return errs / max((first - t0).total_seconds() / 3600, 1.0)
 
 
@@ -198,12 +258,16 @@ def _duration(g: dict) -> str:
     a, b = parse_ts(g["first_seen"]), parse_ts(g["last_seen"])
     if a and b and b > a:
         mins = int((b - a).total_seconds() // 60)
-        return f" (~{mins} minutes)" if mins else ""
+        if mins >= 48 * 60:
+            return f" (~{mins // 1440} days)"
+        if mins >= 120:
+            return f" (~{mins // 60} hours)"
+        return f" (~{mins} minute{'s' if mins != 1 else ''})" if mins else ""
     return ""
 
 
 # Bump when explanations change shape or logic: older cached explanations are then recomputed, not served.
-EXPLAIN_VERSION = 2
+EXPLAIN_VERSION = 3
 
 
 def explain_group(gid: int, refresh: bool = False) -> dict:
@@ -217,6 +281,7 @@ def explain_group(gid: int, refresh: bool = False) -> dict:
             cached = json.loads(g["explanation"])
             if cached.get("v") == EXPLAIN_VERSION:
                 cached["cached"] = True
+                cached["impact"] = impact_of(g)  # the cause can be cached, the numbers keep moving
                 return cached
         except json.JSONDecodeError:
             pass
@@ -262,7 +327,7 @@ def explain_group(gid: int, refresh: bool = False) -> dict:
                 fix = data.get("fix")
                 llm_fix = [str(f) for f in fix] if isinstance(fix, list) else [str(fix)] if fix else []
                 # Concrete rule-derived fixes (exact line change, live-dump advice) always come first.
-                concrete = [f for f in result["fix"] if f.startswith(("Turn off the flag", "In ", "Use a live dump"))]
+                concrete = [f for f in result["fix"] if f.startswith(("Turn off the flag", "The flag '", "In ", "Use a live dump"))]
                 cause = str(data["cause"])
                 if "backup" in result["cause"] and "backup" not in cause.lower():
                     cause += " " + result["cause"][result["cause"].find("At "):] if "At " in result["cause"] else ""
