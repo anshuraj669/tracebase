@@ -260,3 +260,12 @@ def test_impact_of_an_error_that_came_back_describes_this_incident(indexed, monk
     impact = explain_group(gid, refresh=True)["impact"]
     assert impact == ("This time: 30 occurrences since 12:48 (~4 minutes) (130 in all since 2026-11-27 20:51). "
                       "Before it came back, api logged 0.0 other errors/hour."), impact
+
+
+def test_browser_stack_frames_are_read_from_urls():
+    stack = """TypeError: Cannot read properties of undefined (reading 'toLowerCase')
+    at findDuplicate (http://localhost:5173/src/store.ts?t=1764330000000:151:42)
+    at saveLead (https://meetsnap.example.app/src/main.ts:262:62)
+    at http://localhost:5173/node_modules/.vite/deps/firebase_firestore.js?v=1a2b:812:9"""
+    frames = extract_frames(stack)
+    assert [(f.path, f.line, f.func) for f in frames] == [("src/store.ts", 151, "findDuplicate"), ("src/main.ts", 262, "saveLead")]

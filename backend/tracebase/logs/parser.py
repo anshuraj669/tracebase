@@ -99,6 +99,9 @@ def extract_frames(text: str, limit: int = 15) -> list[Frame]:
     seen = set()
     python = False
     for line in text.splitlines():
+        # browser frames: at fn (https://app.example.com/src/store.ts?t=1:42:13) -> at fn (src/store.ts:42:13)
+        line = re.sub(r"(?:https?|webpack|app)://[^/\s)]+/", "", line)
+        line = re.sub(r"\?[^:\s)]*(?=:\d)", "", line)
         for i, pat in enumerate(FRAME_PATTERNS):
             m = pat.search(line)
             if not m:
